@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TriageOS Voice Engine</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <aside class="panel">
+          <div>
+            <p class="eyebrow">TriageOS Phase 1</p>
+            <h1>Voice Engine</h1>
+            <p class="status" id="connectionStatus">Disconnected</p>
+          </div>
+          <div class="controls">
+            <button id="connectButton" type="button">Connect</button>
+            <button id="talkButton" type="button" disabled>Start Talking</button>
+            <button id="stopButton" type="button" disabled>Stop</button>
+          </div>
+          <dl class="metrics">
+            <div>
+              <dt>Session</dt>
+              <dd id="sessionId">-</dd>
+            </div>
+            <div>
+              <dt>Latency</dt>
+              <dd id="latency">-</dd>
+            </div>
+          </dl>
+        </aside>
+
+        <section class="conversation" aria-live="polite">
+          <div class="transcript" id="transcript"></div>
+          <p class="hint" id="hint">Connect, then speak to start the first TriageOS voice loop.</p>
+        </section>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,48 @@
+services:
+  voice:
+    build:
+      context: ..
+      dockerfile: services/voice/Dockerfile
+    environment:
+      CONVERSATION_SERVICE_URL: http://conversation:8001
+    ports:
+      - "8080:8000"
+    depends_on:
+      - conversation
+
+  conversation:
+    build:
+      context: ..
+      dockerfile: services/conversation/Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8001:8001"
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: triageos
+      POSTGRES_USER: triageos
+      POSTGRES_PASSWORD: triageos
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  nats:
+    image: nats:2-alpine
+    command: ["-js"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+volumes:
+  postgres-data:

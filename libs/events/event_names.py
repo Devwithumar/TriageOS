@@ -1,0 +1,13 @@
+VOICE_SESSION_STARTED = "voice.session.started"
+VOICE_AUDIO_CHUNK = "voice.audio.chunk"
+VOICE_TRANSCRIPT_PARTIAL = "voice.user.transcript.partial"
+VOICE_TRANSCRIPT_FINAL = "voice.user.transcript.final"
+VOICE_ASSISTANT_RESPONSE_CREATED = "voice.assistant.response.created"
+VOICE_INTERRUPTION_DETECTED = "voice.interruption.detected"
+VOICE_SESSION_ENDED = "voice.session.ended"
+
+PATIENT_REGISTERED = "patient.registered"
+APPOINTMENT_CREATED = "appointment.created"
+TRIAGE_COMPLETED = "triage.completed"
+SUMMARY_GENERATED = "summary.generated"
+EHR_UPDATED = "ehr.updated"
