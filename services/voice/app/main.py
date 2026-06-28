@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -10,6 +12,7 @@ from libs.events import event_names
 from libs.observability.logging import configure_logging
 from services.voice.app.conversation_client import ConversationClient
 from services.voice.app.schemas import ClientEvent, ServerEvent
+from services.voice.app.session import VoiceSessionController
 
 configure_logging("voice-service")
 logger = logging.getLogger(__name__)
@@ -32,9 +35,75 @@ def web_client() -> FileResponse:
     return FileResponse(frontend_path / "index.html")
 
 
+async def process_turn(
+    websocket: WebSocket,
+    session: VoiceSessionController,
+    turn_id: int,
+    user_text: str,
+    stt_ms: int | None,
+) -> None:
+    turn_started_at = time.perf_counter()
+    try:
+        llm_started_at = time.perf_counter()
+        turn = await conversation_client.create_turn(session.session_id, user_text)
+        llm_ms = round((time.perf_counter() - llm_started_at) * 1000)
+
+        if not session.is_turn_active(turn_id):
+            logger.info(
+                "turn_stale_dropped session=%s turn_id=%s llm_ms=%s",
+                session.session_id,
+                turn_id,
+                llm_ms,
+            )
+            return
+
+        total_ms = round((time.perf_counter() - turn_started_at) * 1000)
+        latency = {
+            "stt_ms": stt_ms,
+            "llm_ms": llm_ms,
+            "server_ms": total_ms,
+        }
+        logger.info(
+            "turn_latency session=%s turn_id=%s stt_ms=%s llm_ms=%s server_ms=%s",
+            session.session_id,
+            turn_id,
+            stt_ms,
+            llm_ms,
+            total_ms,
+        )
+
+        session.begin_speaking()
+        await send_event(
+            websocket,
+            ServerEvent(
+                event=event_names.VOICE_ASSISTANT_RESPONSE_CREATED,
+                session_id=session.session_id,
+                payload={
+                    "turn_id": turn_id,
+                    "text": turn["reply"],
+                    "tts": {"provider": "browser", "voice": "default"},
+                    "usage": turn["usage"],
+                    "latency": latency,
+                },
+            ),
+        )
+    except asyncio.CancelledError:
+        logger.info(
+            "turn_task_cancelled session=%s turn_id=%s",
+            session.session_id,
+            turn_id,
+        )
+        raise
+    except Exception:
+        if session.is_turn_active(turn_id):
+            session.return_to_listening()
+        raise
+
+
 @app.websocket("/v1/voice/sessions/{session_id}/stream")
 async def voice_stream(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
+    session = VoiceSessionController(session_id)
     await send_event(
         websocket,
         ServerEvent(
@@ -72,12 +141,16 @@ async def voice_stream(websocket: WebSocket, session_id: str) -> None:
                 continue
 
             if client_event.event == event_names.VOICE_INTERRUPTION_DETECTED:
+                turn_seq = session.interrupt()
                 await send_event(
                     websocket,
                     ServerEvent(
                         event=event_names.VOICE_INTERRUPTION_DETECTED,
                         session_id=session_id,
-                        payload={"message": "Assistant speech interrupted."},
+                        payload={
+                            "message": "Assistant speech interrupted.",
+                            "turn_seq": turn_seq,
+                        },
                     ),
                 )
                 continue
@@ -98,22 +171,17 @@ async def voice_stream(websocket: WebSocket, session_id: str) -> None:
                 if not user_text:
                     continue
 
-                turn = await conversation_client.create_turn(session_id, user_text)
-                await send_event(
-                    websocket,
-                    ServerEvent(
-                        event=event_names.VOICE_ASSISTANT_RESPONSE_CREATED,
-                        session_id=session_id,
-                        payload={
-                            "text": turn["reply"],
-                            "tts": {"provider": "browser", "voice": "default"},
-                            "usage": turn["usage"],
-                        },
-                    ),
+                stt_raw = client_event.payload.get("stt_ms")
+                stt_ms = int(stt_raw) if stt_raw is not None else None
+                turn_id = session.begin_thinking()
+                task = asyncio.create_task(
+                    process_turn(websocket, session, turn_id, user_text, stt_ms)
                 )
+                session.set_active_task(task)
                 continue
 
             if client_event.event == event_names.VOICE_SESSION_ENDED:
+                session.interrupt()
                 await send_event(
                     websocket,
                     ServerEvent(
@@ -126,6 +194,7 @@ async def voice_stream(websocket: WebSocket, session_id: str) -> None:
                 return
 
     except WebSocketDisconnect:
+        session.interrupt()
         logger.info("Voice session disconnected: %s", session_id)
 
 

@@ -106,14 +106,18 @@ async def test_websocket_session_lifecycle(results: Results) -> None:
             if started.get("event") != "voice.session.started":
                 results.fail("websocket session.started", f"got {started}")
                 return
+            if not started.get("timestamp"):
+                results.fail("server event timestamp", "voice.session.started missing timestamp")
+                return
             results.ok("websocket session.started")
+            results.ok("server event timestamp")
 
             await ws.send(
                 json.dumps(
                     {
                         "event": "voice.user.transcript.final",
                         "session_id": session_id,
-                        "payload": {"text": "hello"},
+                        "payload": {"text": "hello", "stt_ms": 420},
                     }
                 )
             )
@@ -124,8 +128,16 @@ async def test_websocket_session_lifecycle(results: Results) -> None:
                 return
 
             payload = response.get("payload", {})
-            if payload.get("text") and payload.get("tts", {}).get("provider") == "browser":
+            latency = payload.get("latency", {})
+            if (
+                payload.get("text")
+                and payload.get("turn_id", 0) > 0
+                and payload.get("tts", {}).get("provider") == "browser"
+                and latency.get("llm_ms") is not None
+                and latency.get("stt_ms") == 420
+            ):
                 results.ok("websocket assistant response")
+                results.ok("turn latency payload")
             else:
                 results.fail("websocket assistant response", f"unexpected payload: {payload}")
 
@@ -198,7 +210,7 @@ async def test_websocket_audio_chunk_ack(results: Results) -> None:
 
 
 async def test_interruption_layer(results: Results) -> None:
-    """Interruption is foundation-critical — verify current server + client contract."""
+    """Interruption is foundation-critical — verify cancel propagates and turns stay consistent."""
     session_id = f"smoke_{uuid.uuid4()}"
     uri = f"{WS_BASE}/v1/voice/sessions/{session_id}/stream"
     try:
@@ -215,19 +227,21 @@ async def test_interruption_layer(results: Results) -> None:
                 )
             )
             interruption = await recv_json(ws)
-            if interruption.get("event") == "voice.interruption.detected":
-                results.ok("interruption event echo (server acknowledges)")
-            else:
+            if interruption.get("event") != "voice.interruption.detected":
                 results.fail("interruption event echo", f"got {interruption}")
                 return
+            if interruption.get("payload", {}).get("turn_seq", 0) <= 0:
+                results.fail("interruption turn_seq", f"missing turn_seq in {interruption}")
+                return
+            results.ok("interruption event echo (server acknowledges)")
+            results.ok("interruption turn_seq in payload")
 
-            # Send final transcript immediately after interruption — simulates barge-in turn
             await ws.send(
                 json.dumps(
                     {
                         "event": "voice.user.transcript.final",
                         "session_id": session_id,
-                        "payload": {"text": "wait stop, I meant something else"},
+                        "payload": {"text": "wait stop, I meant something else", "stt_ms": 300},
                     }
                 )
             )
@@ -238,19 +252,60 @@ async def test_interruption_layer(results: Results) -> None:
                 results.fail("turn after interruption", f"got {response}")
 
             results.warn(
-                "interruption — in-flight turn cancellation",
-                "server does not cancel pending conversation HTTP calls on interruption",
-            )
-            results.warn(
-                "interruption — client TTS stop on server event",
-                "frontend cancels TTS on talk press, but ignores server interruption event in onmessage",
-            )
-            results.warn(
                 "interruption — automatic barge-in",
                 "no always-on mic / VAD; user must press Start Talking to interrupt",
             )
     except Exception as exc:
         results.fail("interruption layer", str(exc))
+
+
+async def test_stale_turn_superseded(results: Results) -> None:
+    """A rapid second final must invalidate the first in-flight turn."""
+    session_id = f"smoke_{uuid.uuid4()}"
+    uri = f"{WS_BASE}/v1/voice/sessions/{session_id}/stream"
+    try:
+        async with websockets.connect(uri) as ws:
+            await recv_json(ws)
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "event": "voice.user.transcript.final",
+                        "session_id": session_id,
+                        "payload": {"text": "first utterance"},
+                    }
+                )
+            )
+            await ws.send(
+                json.dumps(
+                    {
+                        "event": "voice.user.transcript.final",
+                        "session_id": session_id,
+                        "payload": {"text": "second utterance"},
+                    }
+                )
+            )
+
+            responses: list[dict] = []
+            while len(responses) < 2:
+                try:
+                    message = await recv_json(ws, timeout=3.0)
+                except TimeoutError:
+                    break
+                if message.get("event") == "voice.assistant.response.created":
+                    responses.append(message)
+
+            if len(responses) != 1:
+                results.fail("stale turn superseded", f"expected 1 response, got {len(responses)}")
+                return
+
+            text = responses[0].get("payload", {}).get("text", "")
+            if "second utterance" in text:
+                results.ok("stale turn superseded")
+            else:
+                results.fail("stale turn superseded", f"wrong response text: {text}")
+    except Exception as exc:
+        results.fail("stale turn superseded", str(exc))
 
 
 async def test_invalid_event(results: Results) -> None:
@@ -283,6 +338,7 @@ async def main() -> int:
     await test_websocket_partial_transcript(results)
     await test_websocket_audio_chunk_ack(results)
     await test_interruption_layer(results)
+    await test_stale_turn_superseded(results)
     await test_invalid_event(results)
 
     print("\n" + "=" * 32)

@@ -1,9 +1,15 @@
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 ClientEventType = Literal[
+    # Server-only lifecycle event — listed for schema completeness, clients must not emit.
     "voice.session.started",
     "voice.audio.chunk",
     "voice.user.transcript.partial",
@@ -22,4 +28,5 @@ class ClientEvent(BaseModel):
 class ServerEvent(BaseModel):
     event: str
     session_id: str
+    timestamp: str = Field(default_factory=utc_timestamp)
     payload: dict[str, Any] = Field(default_factory=dict)

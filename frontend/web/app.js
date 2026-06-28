@@ -12,7 +12,10 @@ const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecogni
 let socket;
 let recognition;
 let sessionId;
+let recognitionStartedAt = 0;
 let lastTurnStartedAt = 0;
+let sessionTurnSeq = 0;
+let speakingTurnId = null;
 
 function createSessionId() {
   return `session_${crypto.randomUUID()}`;
@@ -49,12 +52,47 @@ function sendEvent(event, payload = {}) {
   socket.send(JSON.stringify({ event, session_id: sessionId, payload }));
 }
 
-function speak(text) {
+function stopSpeaking() {
   window.speechSynthesis.cancel();
+  speakingTurnId = null;
+}
+
+function logLatency(turnId, label, ms, extra = {}) {
+  const stamp = new Date().toISOString();
+  console.log(`[latency ${stamp}] turn=${turnId} ${label}=${ms}ms`, extra);
+}
+
+function speak(text, turnId) {
+  stopSpeaking();
+  speakingTurnId = turnId;
+
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.rate = 1;
   utterance.pitch = 1;
+
+  let ttsStartedAt = 0;
+  utterance.onstart = () => {
+    ttsStartedAt = performance.now();
+  };
+  utterance.onend = () => {
+    if (speakingTurnId !== turnId) {
+      return;
+    }
+    const ttsMs = Math.round(performance.now() - ttsStartedAt);
+    logLatency(turnId, "tts_ms", ttsMs);
+    speakingTurnId = null;
+  };
+
   window.speechSynthesis.speak(utterance);
+}
+
+function handleInterruption(serverTurnSeq = null) {
+  if (serverTurnSeq !== null) {
+    sessionTurnSeq = Math.max(sessionTurnSeq, serverTurnSeq);
+  } else {
+    sessionTurnSeq += 1;
+  }
+  stopSpeaking();
 }
 
 function configureRecognition() {
@@ -88,9 +126,11 @@ function configureRecognition() {
 
     if (finalText) {
       const cleanedText = finalText.trim();
+      const sttMs = Math.round(performance.now() - recognitionStartedAt);
       addMessage("user", cleanedText);
       lastTurnStartedAt = performance.now();
-      sendEvent("voice.user.transcript.final", { text: cleanedText });
+      logLatency(sessionTurnSeq + 1, "stt_ms", sttMs);
+      sendEvent("voice.user.transcript.final", { text: cleanedText, stt_ms: sttMs });
     }
   };
 
@@ -102,6 +142,7 @@ function configureRecognition() {
 connectButton.addEventListener("click", () => {
   sessionId = createSessionId();
   sessionIdElement.textContent = sessionId;
+  sessionTurnSeq = 0;
   configureRecognition();
 
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
@@ -125,11 +166,25 @@ connectButton.addEventListener("click", () => {
       addMessage("system", serverEvent.payload.message);
     }
 
+    if (serverEvent.event === "voice.interruption.detected") {
+      handleInterruption(serverEvent.payload.turn_seq ?? null);
+      hint.textContent = "Interrupted — listening when you speak.";
+    }
+
     if (serverEvent.event === "voice.assistant.response.created") {
-      const elapsed = Math.round(performance.now() - lastTurnStartedAt);
-      latencyElement.textContent = `${elapsed} ms`;
+      const turnId = serverEvent.payload.turn_id ?? 0;
+      if (turnId < sessionTurnSeq) {
+        logLatency(turnId, "stale_response_dropped", 0, { sessionTurnSeq });
+        return;
+      }
+
+      const latency = serverEvent.payload.latency ?? {};
+      const roundTripMs = Math.round(performance.now() - lastTurnStartedAt);
+      latencyElement.textContent = `${roundTripMs} ms`;
+      logLatency(turnId, "round_trip_ms", roundTripMs, latency);
+
       addMessage("assistant", serverEvent.payload.text);
-      speak(serverEvent.payload.text);
+      speak(serverEvent.payload.text, turnId);
     }
 
     if (serverEvent.event === "voice.error") {
@@ -143,9 +198,10 @@ talkButton.addEventListener("click", () => {
     return;
   }
 
-  window.speechSynthesis.cancel();
+  handleInterruption();
   sendEvent("voice.interruption.detected", {});
   talkButton.disabled = true;
+  recognitionStartedAt = performance.now();
   hint.textContent = "Listening...";
   recognition.start();
 });
@@ -155,7 +211,7 @@ stopButton.addEventListener("click", () => {
     recognition.stop();
   }
 
-  window.speechSynthesis.cancel();
+  handleInterruption();
   sendEvent("voice.session.ended", {});
   socket?.close();
 });
