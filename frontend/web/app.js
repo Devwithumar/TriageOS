@@ -6,6 +6,9 @@ const transcript = document.querySelector("#transcript");
 const sessionIdElement = document.querySelector("#sessionId");
 const latencyElement = document.querySelector("#latency");
 const hint = document.querySelector("#hint");
+const composer = document.querySelector("#composer");
+const messageInput = document.querySelector("#messageInput");
+const sendButton = document.querySelector("#sendButton");
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -21,11 +24,15 @@ function createSessionId() {
   return `session_${crypto.randomUUID()}`;
 }
 
-function setConnected(connected) {
-  connectionStatus.textContent = connected ? "Connected" : "Disconnected";
+function setConnectionState(state) {
+  const connected = state === "Connected";
+  connectionStatus.textContent = state;
+  connectionStatus.dataset.state = state.toLowerCase();
   connectButton.disabled = connected;
   talkButton.disabled = !connected || !SpeechRecognition;
   stopButton.disabled = !connected;
+  messageInput.disabled = !connected;
+  sendButton.disabled = !connected;
 }
 
 function addMessage(role, text) {
@@ -144,18 +151,20 @@ connectButton.addEventListener("click", () => {
   sessionIdElement.textContent = sessionId;
   sessionTurnSeq = 0;
   configureRecognition();
+  setConnectionState("Connecting");
+  hint.textContent = "Connecting to the TriageOS voice engine...";
 
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const host = window.location.host || "localhost:8000";
   socket = new WebSocket(`${protocol}://${host}/v1/voice/sessions/${sessionId}/stream`);
 
   socket.onopen = () => {
-    setConnected(true);
+    setConnectionState("Connected");
     hint.textContent = "Ready. Press Start Talking and say hello.";
   };
 
   socket.onclose = () => {
-    setConnected(false);
+    setConnectionState("Disconnected");
     hint.textContent = "Session closed.";
   };
 
@@ -206,6 +215,22 @@ talkButton.addEventListener("click", () => {
   recognition.start();
 });
 
+composer.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = messageInput.value.trim();
+  if (!text || !socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  handleInterruption();
+  sendEvent("voice.interruption.detected", {});
+  addMessage("user", text);
+  lastTurnStartedAt = performance.now();
+  sendEvent("voice.user.transcript.final", { text, stt_ms: 0, source: "text" });
+  messageInput.value = "";
+  hint.textContent = "Message sent. Waiting for TriageOS...";
+});
+
 stopButton.addEventListener("click", () => {
   if (recognition) {
     recognition.stop();
@@ -216,4 +241,4 @@ stopButton.addEventListener("click", () => {
   socket?.close();
 });
 
-setConnected(false);
+setConnectionState("Disconnected");

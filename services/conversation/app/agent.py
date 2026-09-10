@@ -1,23 +1,17 @@
+from libs.ai.llm import complete_conversation
 from libs.ai.model_router import route_model
 
 
 def generate_reply(user_text: str, recent_messages: list[dict[str, str]]) -> dict[str, object]:
     route = route_model("conversation")
-    normalized_text = user_text.strip()
-
-    if not normalized_text:
-        reply = "I did not catch that. Could you say it once more?"
-    elif any(greeting in normalized_text.lower() for greeting in ("hello", "hi", "hey")):
-        reply = "Hey, I am TriageOS. I can hear you clearly. What would you like to try next?"
-    else:
-        reply = (
-            "I heard you say: "
-            f"{normalized_text}. For this first milestone, I am focused on keeping the voice conversation smooth."
-        )
+    result = complete_conversation(user_text, recent_messages)
 
     return {
-        "reply": reply,
-        "model": route.model,
-        "reason": route.reason,
+        "reply": result.text,
+        "model": result.model,
+        "provider": result.provider,
+        "reason": result.reason or route.reason,
         "context_messages": len(recent_messages),
+        "prompt_tokens": result.prompt_tokens,
+        "completion_tokens": result.completion_tokens,
     }

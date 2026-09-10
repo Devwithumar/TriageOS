@@ -34,7 +34,13 @@
 
         <section class="conversation" aria-live="polite">
           <div class="transcript" id="transcript"></div>
-          <p class="hint" id="hint">Connect, then speak to start the first TriageOS voice loop.</p>
+          <div>
+            <p class="hint" id="hint">Connect, then speak or type to start the first TriageOS voice loop.</p>
+            <form class="composer" id="composer">
+              <input id="messageInput" type="text" autocomplete="off" placeholder="Type a message instead..." disabled />
+              <button id="sendButton" type="submit" disabled>Send</button>
+            </form>
+          </div>
         </section>
       </section>
     </main>

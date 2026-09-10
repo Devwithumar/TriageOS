@@ -1,9 +1,14 @@
+from pathlib import Path
+
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from fastapi import FastAPI
 
 from libs.observability.logging import configure_logging
 from services.conversation.app.agent import generate_reply
 from services.conversation.app.state import ConversationStateStore, compact_state
+
+load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
 configure_logging("conversation-service")
 
@@ -41,8 +46,11 @@ def create_turn(session_id: str, request: ConversationTurnRequest) -> Conversati
         reply=reply,
         state=compact_state(updated_messages),
         usage={
+            "provider": agent_result.get("provider", "stub"),
             "model": agent_result["model"],
             "route_reason": agent_result["reason"],
             "estimated_input_messages": agent_result["context_messages"],
+            "prompt_tokens": agent_result.get("prompt_tokens"),
+            "completion_tokens": agent_result.get("completion_tokens"),
         },
     )

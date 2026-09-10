@@ -14,6 +14,8 @@ services:
     build:
       context: ..
       dockerfile: services/conversation/Dockerfile
+    env_file:
+      - ../.env
     environment:
       REDIS_URL: redis://redis:6379/0
     ports:

@@ -70,6 +70,18 @@ h1 {
   margin: 12px 0 0;
 }
 
+.status[data-state="connected"] {
+  color: #18794e;
+}
+
+.status[data-state="connecting"] {
+  color: #9a6700;
+}
+
+.status[data-state="disconnected"] {
+  color: #b42318;
+}
+
 .controls {
   display: grid;
   gap: 10px;
@@ -164,6 +176,26 @@ dd {
 .hint {
   color: #527064;
   margin: 20px 0 0;
+}
+
+.composer {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr auto;
+  margin-top: 16px;
+}
+
+.composer input {
+  border: 1px solid #c9d7d3;
+  border-radius: 8px;
+  font: inherit;
+  min-width: 0;
+  padding: 0 14px;
+}
+
+.composer button {
+  background: #006d77;
+  color: #ffffff;
 }
 
 @media (max-width: 840px) {
