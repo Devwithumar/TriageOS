@@ -11,6 +11,7 @@ const messageInput = document.querySelector("#messageInput");
 const sendButton = document.querySelector("#sendButton");
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const canRecordAudio = Boolean(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
 
 let socket;
 let recognition;
@@ -19,6 +20,9 @@ let recognitionStartedAt = 0;
 let lastTurnStartedAt = 0;
 let sessionTurnSeq = 0;
 let speakingTurnId = null;
+let mediaStream;
+let mediaRecorder;
+let audioChunks = [];
 
 function createSessionId() {
   return `session_${crypto.randomUUID()}`;
@@ -26,10 +30,11 @@ function createSessionId() {
 
 function setConnectionState(state) {
   const connected = state === "Connected";
+  const hasVoiceInput = Boolean(SpeechRecognition || canRecordAudio);
   connectionStatus.textContent = state;
   connectionStatus.dataset.state = state.toLowerCase();
   connectButton.disabled = connected;
-  talkButton.disabled = !connected || !SpeechRecognition;
+  talkButton.disabled = !connected || !hasVoiceInput;
   stopButton.disabled = !connected;
   messageInput.disabled = !connected;
   sendButton.disabled = !connected;
@@ -104,7 +109,6 @@ function handleInterruption(serverTurnSeq = null) {
 
 function configureRecognition() {
   if (!SpeechRecognition) {
-    addMessage("system", "This browser does not support SpeechRecognition. Try Chrome or Edge.");
     return;
   }
 
@@ -143,7 +147,77 @@ function configureRecognition() {
 
   recognition.onend = () => {
     talkButton.disabled = !socket || socket.readyState !== WebSocket.OPEN;
+    talkButton.textContent = "Start Talking";
   };
+}
+
+function selectRecordingMimeType() {
+  const candidates = ["audio/ogg;codecs=opus", "audio/webm;codecs=opus", "audio/webm"];
+  return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || "";
+}
+
+function arrayBufferToBase64(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function stopMediaRecording() {
+  if (!mediaRecorder || mediaRecorder.state === "inactive") {
+    return;
+  }
+
+  const recorder = mediaRecorder;
+  const stopped = new Promise((resolve) => recorder.addEventListener("stop", resolve, { once: true }));
+  recorder.stop();
+  await stopped;
+
+  const audioBlob = new Blob(audioChunks, { type: recorder.mimeType });
+  audioChunks = [];
+  mediaRecorder = null;
+  mediaStream?.getTracks().forEach((track) => track.stop());
+  mediaStream = null;
+
+  if (!audioBlob.size) {
+    hint.textContent = "No audio detected. Try again.";
+    return;
+  }
+
+  const audioBuffer = await audioBlob.arrayBuffer();
+  const sttMs = Math.round(performance.now() - recognitionStartedAt);
+  sendEvent("voice.audio.chunk", {
+    audio_base64: arrayBufferToBase64(audioBuffer),
+    mime_type: audioBlob.type,
+    is_final: true,
+    stt_ms: sttMs,
+  });
+  hint.textContent = "Audio sent. Waiting for TriageOS...";
+}
+
+async function startMediaRecording() {
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = selectRecordingMimeType();
+    mediaRecorder = new MediaRecorder(mediaStream, mimeType ? { mimeType } : undefined);
+    audioChunks = [];
+    mediaRecorder.addEventListener("dataavailable", (event) => {
+      if (event.data.size) {
+        audioChunks.push(event.data);
+      }
+    });
+    mediaRecorder.start();
+    recognitionStartedAt = performance.now();
+    talkButton.textContent = "Stop Talking";
+    hint.textContent = "Listening... Press Stop Talking when you finish.";
+  } catch (error) {
+    addMessage("system", "Microphone access was not available. Check Firefox permissions and try again.");
+    hint.textContent = "Microphone permission is required for voice input.";
+    console.error(error);
+  }
 }
 
 connectButton.addEventListener("click", () => {
@@ -199,20 +273,37 @@ connectButton.addEventListener("click", () => {
     if (serverEvent.event === "voice.error") {
       addMessage("system", serverEvent.payload.message);
     }
+
+    if (serverEvent.event === "voice.audio.chunk.ack" && serverEvent.payload.transcribed === false) {
+      addMessage("system", "Audio captured. Configure a speech-to-text provider to receive a transcript.");
+    }
   };
 });
 
 talkButton.addEventListener("click", () => {
-  if (!recognition) {
+  if (SpeechRecognition) {
+    if (!recognition) {
+      return;
+    }
+
+    handleInterruption();
+    sendEvent("voice.interruption.detected", {});
+    talkButton.disabled = true;
+    recognitionStartedAt = performance.now();
+    hint.textContent = "Listening...";
+    recognition.start();
+    return;
+  }
+
+  if (mediaRecorder?.state === "recording") {
+    stopMediaRecording();
+    talkButton.textContent = "Start Talking";
     return;
   }
 
   handleInterruption();
   sendEvent("voice.interruption.detected", {});
-  talkButton.disabled = true;
-  recognitionStartedAt = performance.now();
-  hint.textContent = "Listening...";
-  recognition.start();
+  startMediaRecording();
 });
 
 composer.addEventListener("submit", (event) => {
@@ -235,6 +326,13 @@ stopButton.addEventListener("click", () => {
   if (recognition) {
     recognition.stop();
   }
+
+  if (mediaRecorder?.state === "recording") {
+    mediaRecorder.stop();
+  }
+  mediaStream?.getTracks().forEach((track) => track.stop());
+  mediaRecorder = null;
+  mediaStream = null;
 
   handleInterruption();
   sendEvent("voice.session.ended", {});

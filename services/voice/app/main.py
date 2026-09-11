@@ -3,6 +3,7 @@ import logging
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,7 +14,9 @@ from libs.observability.logging import configure_logging
 from services.voice.app.conversation_client import ConversationClient
 from services.voice.app.schemas import ClientEvent, ServerEvent
 from services.voice.app.session import VoiceSessionController
+from services.voice.app.transcriber import transcribe_audio
 
+load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 configure_logging("voice-service")
 logger = logging.getLogger(__name__)
 
@@ -130,12 +133,46 @@ async def voice_stream(websocket: WebSocket, session_id: str) -> None:
                 continue
 
             if client_event.event == event_names.VOICE_AUDIO_CHUNK:
+                transcription = None
+                if client_event.payload.get("is_final") and client_event.payload.get("audio_base64"):
+                    try:
+                        transcription = await transcribe_audio(
+                            str(client_event.payload["audio_base64"]),
+                            str(client_event.payload.get("mime_type", "audio/webm")),
+                        )
+                    except Exception as exc:
+                        await send_event(
+                            websocket,
+                            ServerEvent(
+                                event="voice.error",
+                                session_id=session_id,
+                                payload={"message": str(exc)},
+                            ),
+                        )
+                        continue
+
+                    if transcription and transcription.text:
+                        turn_id = session.begin_thinking()
+                        task = asyncio.create_task(
+                            process_turn(
+                                websocket,
+                                session,
+                                turn_id,
+                                transcription.text,
+                                int(client_event.payload.get("stt_ms", 0)),
+                            )
+                        )
+                        session.set_active_task(task)
+
                 await send_event(
                     websocket,
                     ServerEvent(
                         event="voice.audio.chunk.ack",
                         session_id=session_id,
-                        payload={"received": True},
+                        payload={
+                            "received": True,
+                            "transcribed": bool(transcription and transcription.text),
+                        },
                     ),
                 )
                 continue

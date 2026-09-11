@@ -22,7 +22,7 @@ The first milestone is intentionally narrow:
 
 ## Local Stack
 
-- Web client: browser SpeechRecognition and SpeechSynthesis
+- Web client: browser SpeechRecognition where available, with MediaRecorder fallback
 - Voice Service: FastAPI WebSocket gateway
 - Conversation Service: FastAPI stateful conversation brain
 - Redis: session state and memory
@@ -58,6 +58,8 @@ Then open:
 ```text
 http://localhost:8000
 ```
+
+Firefox uses the MediaRecorder fallback. To turn recorded audio into text, set `STT_PROVIDER=deepgram` and add `DEEPGRAM_API_KEY` to `.env`. Chromium browsers continue using browser SpeechRecognition without this setting.
 
 ## Repository Layout
 
