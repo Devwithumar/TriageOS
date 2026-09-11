@@ -152,6 +152,18 @@ async def voice_stream(websocket: WebSocket, session_id: str) -> None:
                         continue
 
                     if transcription and transcription.text:
+                        await send_event(
+                            websocket,
+                            ServerEvent(
+                                event=event_names.VOICE_TRANSCRIPT_FINAL,
+                                session_id=session_id,
+                                payload={
+                                    "text": transcription.text,
+                                    "stt_ms": int(client_event.payload.get("stt_ms", 0)),
+                                    "source": transcription.provider,
+                                },
+                            ),
+                        )
                         turn_id = session.begin_thinking()
                         task = asyncio.create_task(
                             process_turn(

@@ -35,6 +35,17 @@
         <section class="conversation" aria-live="polite">
           <div class="transcript" id="transcript"></div>
           <div>
+            <div class="voice-stage" id="voiceStage" data-mode="idle">
+              <div class="waveform" id="waveform" aria-label="Microphone activity" role="img">
+                <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+                <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+                <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+                <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+              </div>
+              <p class="activity-label" id="activityLabel">Ready when you are</p>
+              <p class="activity-detail" id="activityDetail">Connect to start a private voice session.</p>
+              <p class="live-transcript" id="liveTranscript" aria-live="polite" hidden></p>
+            </div>
             <p class="hint" id="hint">Connect, then speak or type to start the first TriageOS voice loop.</p>
             <form class="composer" id="composer">
               <input id="messageInput" type="text" autocomplete="off" placeholder="Type a message instead..." disabled />
@@ -44,6 +55,6 @@
         </section>
       </section>
     </main>
-    <script src="/static/app.js?v=2"></script>
+    <script src="/static/app.js?v=4"></script>
   </body>
 </html>
