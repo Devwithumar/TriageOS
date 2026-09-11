@@ -9,6 +9,7 @@ const hint = document.querySelector("#hint");
 const composer = document.querySelector("#composer");
 const messageInput = document.querySelector("#messageInput");
 const sendButton = document.querySelector("#sendButton");
+const voiceSelect = document.querySelector("#voiceSelect");
 const voiceStage = document.querySelector("#voiceStage");
 const activityLabel = document.querySelector("#activityLabel");
 const activityDetail = document.querySelector("#activityDetail");
@@ -36,6 +37,7 @@ let audioContext;
 let analyser;
 let visualizerFrame;
 let visualizerStream;
+let availableVoices = [];
 
 const maxReconnectAttempts = 5;
 
@@ -161,6 +163,33 @@ function stopSpeaking() {
   speakingTurnId = null;
 }
 
+function preferredVoice(voices) {
+  const preferredNames = [
+    "Microsoft Aria",
+    "Microsoft Jenny",
+    "Google US English",
+    "Samantha",
+    "Ava",
+    "Karen",
+  ];
+  return preferredNames
+    .map((name) => voices.find((voice) => voice.name.toLowerCase().includes(name.toLowerCase())))
+    .find(Boolean) || voices.find((voice) => voice.lang.toLowerCase().startsWith("en"));
+}
+
+function refreshVoices() {
+  availableVoices = window.speechSynthesis.getVoices().filter((voice) => voice.lang.toLowerCase().startsWith("en"));
+  const selectedValue = voiceSelect.value || "auto";
+  voiceSelect.replaceChildren(new Option("Natural voice (automatic)", "auto"));
+  availableVoices.forEach((voice) => {
+    voiceSelect.append(new Option(`${voice.name} · ${voice.lang}`, voice.name));
+  });
+  voiceSelect.value = availableVoices.some((voice) => voice.name === selectedValue) ? selectedValue : "auto";
+}
+
+window.speechSynthesis.addEventListener("voiceschanged", refreshVoices);
+refreshVoices();
+
 function logLatency(turnId, label, ms, extra = {}) {
   const stamp = new Date().toISOString();
   console.log(`[latency ${stamp}] turn=${turnId} ${label}=${ms}ms`, extra);
@@ -171,8 +200,13 @@ function speak(text, turnId) {
   speakingTurnId = turnId;
 
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 1;
-  utterance.pitch = 1;
+  const selectedVoice = voiceSelect.value === "auto"
+    ? preferredVoice(availableVoices)
+    : availableVoices.find((voice) => voice.name === voiceSelect.value);
+  utterance.voice = selectedVoice || null;
+  utterance.rate = 0.96;
+  utterance.pitch = 1.04;
+  utterance.volume = 0.9;
 
   let ttsStartedAt = 0;
   utterance.onstart = () => {

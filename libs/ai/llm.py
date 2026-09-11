@@ -9,10 +9,16 @@ from libs.ai.config import LLMConfig, load_llm_config, resolve_api_key_env_name
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
-    "You are TriageOS, a natural voice assistant for a healthcare product. "
-    "Phase 1 is voice-only conversation — no medical advice, triage, scheduling, or EHR actions. "
-    "Keep replies short and spoken-friendly (one to three sentences). "
-    "Be warm, clear, and conversational."
+    "You are TriageOS, a calm and capable voice assistant for a healthcare product. "
+    "This is Phase 1, so have natural general conversations only. Do not provide medical advice, "
+    "diagnoses, triage, scheduling, or EHR actions yet. Keep replies spoken-friendly: one or two "
+    "short sentences, no markdown, no lists, and no unnecessary repetition. Acknowledge what the "
+    "person said, answer when you can, and ask one useful follow-up question when appropriate. "
+    "If a person asks for healthcare help, explain that those capabilities are coming later and "
+    "offer to continue with a general conversation. Exception: if they mention a potentially "
+    "life-threatening symptom such as chest pain or difficulty breathing, do not deflect. Tell "
+    "them to contact local emergency services immediately or have someone take them to the nearest "
+    "emergency department, and advise them not to drive themselves. Do not diagnose or reassure them."
 )
 
 
@@ -26,12 +32,16 @@ class CompletionResult:
     completion_tokens: int | None = None
 
 
-def complete_conversation(user_text: str, recent_messages: list[dict[str, str]]) -> CompletionResult:
+def complete_conversation(
+    user_text: str,
+    recent_messages: list[dict[str, str]],
+    conversation_context: dict[str, object] | None = None,
+) -> CompletionResult:
     config = load_llm_config()
-    messages = _build_messages(user_text, recent_messages)
+    messages = _build_messages(user_text, recent_messages, conversation_context or {})
 
     if config.provider == "stub":
-        return _stub_complete(user_text, recent_messages, config)
+        return _stub_complete(user_text, recent_messages, config, conversation_context or {})
 
     if not config.api_key:
         env_name = resolve_api_key_env_name(config.provider)
@@ -46,8 +56,16 @@ def complete_conversation(user_text: str, recent_messages: list[dict[str, str]])
     raise RuntimeError(f"Unsupported LLM_PROVIDER: {config.provider}")
 
 
-def _build_messages(user_text: str, recent_messages: list[dict[str, str]]) -> list[dict[str, str]]:
+def _build_messages(
+    user_text: str,
+    recent_messages: list[dict[str, str]],
+    conversation_context: dict[str, object],
+) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.append({
+        "role": "system",
+        "content": f"Conversation context (use quietly, do not mention it): {conversation_context}",
+    })
     messages.extend(recent_messages)
     messages.append({"role": "user", "content": user_text.strip()})
     return messages
@@ -57,17 +75,35 @@ def _stub_complete(
     user_text: str,
     recent_messages: list[dict[str, str]],
     config: LLMConfig,
+    conversation_context: dict[str, object],
 ) -> CompletionResult:
     normalized_text = user_text.strip()
+    lowered_text = normalized_text.lower()
+    intent = str(conversation_context.get("current_intent", "general_conversation"))
     if not normalized_text:
-        reply = "I did not catch that. Could you say it once more?"
-    elif any(greeting in normalized_text.lower() for greeting in ("hello", "hi", "hey")):
-        reply = "Hey, I am TriageOS. I can hear you clearly. What would you like to try next?"
+        reply = "I didn’t catch that. Could you say it once more?"
+    elif intent == "greeting":
+        reply = "Hey, I’m TriageOS. I’m ready to chat. What would you like to talk about?"
+    elif intent == "capabilities":
+        reply = "I’m TriageOS, a voice assistant for healthcare teams. Right now I’m focused on having a smooth, natural conversation with you."
+    elif intent == "gratitude":
+        reply = "You’re welcome. What would you like to explore next?"
+    elif intent == "goodbye":
+        reply = "It was good talking with you. I’ll be here whenever you’re ready to continue."
+    elif intent == "urgent_safety":
+        reply = "Chest pain can be serious. If this is happening now, call your local emergency services immediately or have someone take you to the nearest emergency department. Please do not drive yourself."
+    elif intent == "healthcare_request":
+        reply = "That healthcare workflow is planned for a later TriageOS phase. For now, I can still keep you company or answer general questions."
+    elif intent == "question":
+        reply = "That’s a good question. I’m still in my conversation-first phase, but I can think it through with you. What matters most about it?"
+    elif intent == "sharing" and recent_messages:
+        reply = "I’m with you. What part of that feels most important right now?"
+    elif intent == "sharing":
+        reply = "Thanks for sharing that. What would you like to explore about it?"
+    elif recent_messages:
+        reply = "I’m following along. Would you like to tell me a little more, or switch to another topic?"
     else:
-        reply = (
-            "I heard you say: "
-            f"{normalized_text}. For this first milestone, I am focused on keeping the voice conversation smooth."
-        )
+        reply = "Thanks for sharing that. I’m following along. Would you like to tell me more about it?"
 
     return CompletionResult(
         text=reply,

@@ -42,9 +42,9 @@ class ConversationStateStore:
         return f"conversation:{session_id}:messages"
 
 
-def compact_state(messages: list[dict[str, str]]) -> dict[str, Any]:
+def compact_state(messages: list[dict[str, str]], structured_state: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "recent_messages": messages,
-        "summary": "Conversation summary placeholder for Phase 1.",
-        "structured_state": {},
+        "summary": "Short-term conversation context is active.",
+        "structured_state": structured_state or {},
     }

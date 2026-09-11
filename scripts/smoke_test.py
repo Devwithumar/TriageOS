@@ -97,6 +97,32 @@ async def test_conversation_turn(results: Results) -> None:
             results.fail("conversation turn", str(exc))
 
 
+async def test_urgent_safety_response(results: Results) -> None:
+    session_id = f"safety_{uuid.uuid4()}"
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{CONVERSATION_URL}/v1/conversations/{session_id}/turn",
+                json={"session_id": session_id, "text": "I am having chest pains"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            body = response.json()
+            reply = body.get("reply", "").lower()
+            intent = body.get("usage", {}).get("intent", {}).get("name")
+            if (
+                intent == "urgent_safety"
+                and payload.get("provider") == "guardrail"
+                and "emergency" in reply
+                and "do not drive" in reply
+            ):
+                results.ok("urgent safety escalation")
+            else:
+                results.fail("urgent safety escalation", f"unexpected response: {body}")
+        except Exception as exc:
+            results.fail("urgent safety escalation", str(exc))
+
+
 async def test_websocket_session_lifecycle(results: Results) -> None:
     session_id = f"smoke_{uuid.uuid4()}"
     uri = f"{WS_BASE}/v1/voice/sessions/{session_id}/stream"
@@ -330,6 +356,7 @@ async def main() -> int:
     await test_health(results)
     await test_web_client(results)
     await test_conversation_turn(results)
+    await test_urgent_safety_response(results)
     await test_websocket_session_lifecycle(results)
     await test_websocket_partial_transcript(results)
     await test_websocket_audio_chunk_ack(results)

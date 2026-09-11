@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>TriageOS Voice Engine</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=3" />
   </head>
   <body>
     <main class="shell">
@@ -20,6 +20,12 @@
             <button id="talkButton" type="button" disabled>Start Talking</button>
             <button id="stopButton" type="button" disabled>Stop</button>
           </div>
+          <label class="voice-setting" for="voiceSelect">
+            <span>Assistant voice</span>
+            <select id="voiceSelect">
+              <option value="auto">Natural voice (automatic)</option>
+            </select>
+          </label>
           <dl class="metrics">
             <div>
               <dt>Session</dt>
@@ -55,6 +61,6 @@
         </section>
       </section>
     </main>
-    <script src="/static/app.js?v=4"></script>
+    <script src="/static/app.js?v=5"></script>
   </body>
 </html>

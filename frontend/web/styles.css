@@ -91,6 +91,36 @@ h1 {
 .controls {
   display: grid;
   gap: 10px;
+  min-width: 0;
+}
+
+.controls button {
+  min-width: 0;
+  width: 100%;
+}
+
+.voice-setting {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.voice-setting span {
+  color: #527064;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.voice-setting select {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid #c9d7d3;
+  border-radius: 10px;
+  color: #17211f;
+  font: inherit;
+  min-height: 42px;
+  padding: 0 10px;
+  width: 100%;
 }
 
 #connectButton {
@@ -143,6 +173,11 @@ dd {
   min-width: 0;
   padding: 24px;
   backdrop-filter: blur(20px);
+  min-width: 0;
+}
+
+.panel > * {
+  min-width: 0;
 }
 
 .voice-stage {
@@ -153,6 +188,7 @@ dd {
   min-height: 86px;
   padding: 12px 0 4px;
   text-align: center;
+  width: 100%;
 }
 
 .waveform {
@@ -245,6 +281,7 @@ dd {
   gap: 10px;
   grid-template-columns: 1fr auto;
   margin-top: 16px;
+  width: 100%;
 }
 
 .composer input {

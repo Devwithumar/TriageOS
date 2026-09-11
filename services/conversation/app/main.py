@@ -44,7 +44,7 @@ def create_turn(session_id: str, request: ConversationTurnRequest) -> Conversati
     return ConversationTurnResponse(
         session_id=session_id,
         reply=reply,
-        state=compact_state(updated_messages),
+        state=compact_state(updated_messages, agent_result.get("context", {})),
         usage={
             "provider": agent_result.get("provider", "stub"),
             "model": agent_result["model"],
@@ -52,5 +52,6 @@ def create_turn(session_id: str, request: ConversationTurnRequest) -> Conversati
             "estimated_input_messages": agent_result["context_messages"],
             "prompt_tokens": agent_result.get("prompt_tokens"),
             "completion_tokens": agent_result.get("completion_tokens"),
+            "intent": agent_result.get("intent", {}),
         },
     )
