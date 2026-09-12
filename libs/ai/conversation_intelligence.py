@@ -25,6 +25,28 @@ HEALTHCARE_TERMS = (
     "pain",
 )
 
+RECEPTIONIST_TERMS = (
+    "appointment",
+    "book a visit",
+    "schedule",
+    "reschedule",
+    "cancel my appointment",
+    "see a doctor",
+    "available slot",
+    "availability",
+)
+
+PRACTICE_INFO_TERMS = (
+    "opening hours",
+    "office hours",
+    "where are you",
+    "location",
+    "address",
+    "accept insurance",
+    "insurance",
+    "phone number",
+)
+
 URGENT_TERMS = (
     "chest pain",
     "chest pressure",
@@ -52,6 +74,18 @@ def detect_intent(text: str) -> ConversationIntent:
         return ConversationIntent("unclear", 1.0, None, True)
     if any(term in normalized for term in URGENT_TERMS):
         return ConversationIntent("urgent_safety", 0.99, topic, False)
+    if any(phrase in normalized for phrase in ("cancel my appointment", "cancel the appointment", "i want to cancel")):
+        return ConversationIntent("appointment_cancellation", 0.97, topic, False)
+    if any(phrase in normalized for phrase in ("reschedule", "change my appointment", "change the appointment")):
+        return ConversationIntent("appointment_change", 0.96, topic, True)
+    if any(phrase in normalized for phrase in ("yes", "confirm", "looks good", "that's correct", "that is correct")):
+        return ConversationIntent("confirmation", 0.9, topic, False)
+    if any(phrase in normalized for phrase in ("actually", "change that", "correct that", "i meant")):
+        return ConversationIntent("correction", 0.88, topic, True)
+    if any(term in normalized for term in RECEPTIONIST_TERMS):
+        return ConversationIntent("appointment_request", 0.96, topic, True)
+    if any(term in normalized for term in PRACTICE_INFO_TERMS):
+        return ConversationIntent("practice_information", 0.94, topic, True)
     if any(greeting in normalized.split() for greeting in ("hello", "hi", "hey", "good morning", "good afternoon")):
         return ConversationIntent("greeting", 0.98, topic, True)
     if any(phrase in normalized for phrase in ("who are you", "what are you", "what can you do", "how do you work")):

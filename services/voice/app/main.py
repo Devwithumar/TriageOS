@@ -100,7 +100,25 @@ async def process_turn(
     except Exception:
         if session.is_turn_active(turn_id):
             session.return_to_listening()
-        raise
+        logger.exception(
+            "turn_failed session=%s turn_id=%s",
+            session.session_id,
+            turn_id,
+        )
+        try:
+            await send_event(
+                websocket,
+                ServerEvent(
+                    event="voice.error",
+                    session_id=session.session_id,
+                    payload={
+                        "message": "TriageOS could not process that message. Please try again.",
+                        "retryable": True,
+                    },
+                ),
+            )
+        except Exception:
+            logger.info("unable_to_send_turn_error session=%s", session.session_id)
 
 
 @app.websocket("/v1/voice/sessions/{session_id}/stream")
@@ -141,12 +159,16 @@ async def voice_stream(websocket: WebSocket, session_id: str) -> None:
                             str(client_event.payload.get("mime_type", "audio/webm")),
                         )
                     except Exception as exc:
+                        logger.warning("transcription_failed session=%s error=%s", session_id, exc)
                         await send_event(
                             websocket,
                             ServerEvent(
                                 event="voice.error",
                                 session_id=session_id,
-                                payload={"message": str(exc)},
+                                payload={
+                                    "message": str(exc),
+                                    "retryable": True,
+                                },
                             ),
                         )
                         continue

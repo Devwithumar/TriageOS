@@ -364,7 +364,7 @@ async function startMediaRecording() {
   }
 }
 
-function connect() {
+function connect({ reconnect = false } = {}) {
   if (socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) {
     return;
   }
@@ -372,9 +372,11 @@ function connect() {
   clearReconnectTimer();
   intentionalClose = false;
   lastSocketError = false;
-  sessionId = createSessionId();
+  if (!reconnect || !sessionId) {
+    sessionId = createSessionId();
+    sessionTurnSeq = 0;
+  }
   sessionIdElement.textContent = sessionId;
-  sessionTurnSeq = 0;
   configureRecognition();
   setConnectionState("Connecting");
   hint.textContent = "Connecting to the TriageOS voice engine...";
@@ -401,7 +403,10 @@ function connect() {
       reconnectAttempts += 1;
       setConnectionState("Reconnecting");
       hint.textContent = "Connection lost. Reconnecting automatically...";
-      reconnectTimer = window.setTimeout(connect, Math.min(1000 * 2 ** (reconnectAttempts - 1), 8000));
+      reconnectTimer = window.setTimeout(
+        () => connect({ reconnect: true }),
+        Math.min(1000 * 2 ** (reconnectAttempts - 1), 8000),
+      );
     } else {
       hint.textContent = lastSocketError ? "Unable to reach the voice service." : "Session closed.";
       connectButton.disabled = false;

@@ -11,6 +11,15 @@ from dataclasses import dataclass, field
 import httpx
 import websockets
 
+from libs.conversation.contracts import (
+    ConversationState,
+    ExtractedSlot,
+    IntentClassification,
+    IntentName,
+    ReceptionistState,
+)
+from libs.conversation.workflow import apply_receptionist_turn
+
 VOICE_URL = "http://localhost:8000"
 CONVERSATION_URL = "http://localhost:8001"
 WS_BASE = "ws://localhost:8000"
@@ -33,6 +42,36 @@ class Results:
     def warn(self, name: str, detail: str) -> None:
         self.warnings.append(f"{name}: {detail}")
         print(f"  WARN  {name} — {detail}")
+
+
+def test_workflow_contracts(results: Results) -> None:
+    try:
+        state = ConversationState(session_id="workflow_smoke")
+        intent = IntentClassification(name=IntentName.APPOINTMENT_REQUEST, confidence=1)
+        entities = {
+            name: ExtractedSlot(value=value, confidence=1)
+            for name, value in {
+                "caller_name": "Alex Johnson",
+                "callback_number": "08098765432",
+                "preferred_time": "Tuesday afternoon",
+                "appointment_reason": "general consultation",
+            }.items()
+        }
+        review = apply_receptionist_turn(state, intent, entities)
+        confirmed = apply_receptionist_turn(
+            review.state,
+            IntentClassification(name=IntentName.CONFIRMATION, confidence=1),
+        )
+        if (
+            review.state.workflow.state == ReceptionistState.REVIEWING_REQUEST
+            and confirmed.tool_call
+            and confirmed.tool_call.name == "create_appointment_request"
+        ):
+            results.ok("workflow contract transitions")
+        else:
+            results.fail("workflow contract transitions", "unexpected workflow decision")
+    except Exception as exc:
+        results.fail("workflow contract transitions", str(exc))
 
 
 async def recv_json(ws: websockets.ClientConnection, timeout: float = 5.0) -> dict:
@@ -109,10 +148,11 @@ async def test_urgent_safety_response(results: Results) -> None:
             response.raise_for_status()
             body = response.json()
             reply = body.get("reply", "").lower()
-            intent = body.get("usage", {}).get("intent", {}).get("name")
+            usage = body.get("usage", {})
+            intent = usage.get("intent", {}).get("name")
             if (
                 intent == "urgent_safety"
-                and payload.get("provider") == "guardrail"
+                and usage.get("provider") == "guardrail"
                 and "emergency" in reply
                 and "do not drive" in reply
             ):
@@ -121,6 +161,43 @@ async def test_urgent_safety_response(results: Results) -> None:
                 results.fail("urgent safety escalation", f"unexpected response: {body}")
         except Exception as exc:
             results.fail("urgent safety escalation", str(exc))
+
+
+async def test_receptionist_appointment_flow(results: Results) -> None:
+    session_id = f"receptionist_{uuid.uuid4()}"
+    turns = [
+        "I need to book an appointment",
+        "My name is Jane Doe",
+        "08012345678 tomorrow morning",
+        "general consultation",
+        "yes",
+    ]
+    async with httpx.AsyncClient() as client:
+        try:
+            body = None
+            for text in turns:
+                response = await client.post(
+                    f"{CONVERSATION_URL}/v1/conversations/{session_id}/turn",
+                    json={"session_id": session_id, "text": text},
+                    timeout=10,
+                )
+                response.raise_for_status()
+                body = response.json()
+
+            state = body.get("state", {}).get("structured_state", {})
+            usage = body.get("usage", {})
+            if (
+                usage.get("provider") == "workflow"
+                and usage.get("tool_call", {}).get("name") == "create_appointment_request"
+                and state.get("appointment_status") == "confirmed"
+                and state.get("caller_name") == "Jane Doe"
+                and state.get("callback_number") == "08012345678"
+            ):
+                results.ok("receptionist appointment request")
+            else:
+                results.fail("receptionist appointment request", f"unexpected response: {body}")
+        except Exception as exc:
+            results.fail("receptionist appointment request", str(exc))
 
 
 async def test_websocket_session_lifecycle(results: Results) -> None:
@@ -351,12 +428,14 @@ async def test_invalid_event(results: Results) -> None:
 
 async def main() -> int:
     results = Results()
-    print("\nTriageOS Phase 1 Smoke Tests\n" + "=" * 32)
+    print("\nTriageOS Voice and Receptionist Smoke Tests\n" + "=" * 44)
 
+    test_workflow_contracts(results)
     await test_health(results)
     await test_web_client(results)
     await test_conversation_turn(results)
     await test_urgent_safety_response(results)
+    await test_receptionist_appointment_flow(results)
     await test_websocket_session_lifecycle(results)
     await test_websocket_partial_transcript(results)
     await test_websocket_audio_chunk_ack(results)

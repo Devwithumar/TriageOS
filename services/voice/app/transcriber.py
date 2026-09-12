@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import os
 from dataclasses import dataclass
 
@@ -33,15 +34,24 @@ async def transcribe_audio(audio_base64: str, mime_type: str) -> TranscriptionRe
         "Authorization": f"Token {api_key}",
         "Content-Type": mime_type or "application/octet-stream",
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            "https://api.deepgram.com/v1/listen",
-            params=params,
-            headers=headers,
-            content=audio_bytes,
-        )
-        response.raise_for_status()
-        body = response.json()
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                response = await client.post(
+                    "https://api.deepgram.com/v1/listen",
+                    params=params,
+                    headers=headers,
+                    content=audio_bytes,
+                )
+                response.raise_for_status()
+                body = response.json()
+                break
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+            if attempt == 2:
+                raise RuntimeError("Speech recognition is temporarily unavailable. Please try again.") from exc
+            await asyncio.sleep(0.5 * (2**attempt))
+    else:
+        raise RuntimeError("Speech recognition is temporarily unavailable. Please try again.")
 
     channels = body.get("results", {}).get("channels", [{}])
     alternatives = channels[0].get("alternatives", [{}]) if channels else [{}]

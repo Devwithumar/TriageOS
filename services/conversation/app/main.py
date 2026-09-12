@@ -36,15 +36,17 @@ def health() -> dict[str, str]:
 @app.post("/v1/conversations/{session_id}/turn", response_model=ConversationTurnResponse)
 def create_turn(session_id: str, request: ConversationTurnRequest) -> ConversationTurnResponse:
     recent_messages = state_store.get_recent_messages(session_id)
-    agent_result = generate_reply(request.text, recent_messages)
+    structured_state = state_store.get_structured_state(session_id)
+    agent_result = generate_reply(request.text, recent_messages, structured_state, session_id)
     reply = str(agent_result["reply"])
     state_store.append_turn(session_id, request.text, reply)
+    state_store.update_structured_state(session_id, agent_result.get("structured_state", structured_state))
 
     updated_messages = state_store.get_recent_messages(session_id)
     return ConversationTurnResponse(
         session_id=session_id,
         reply=reply,
-        state=compact_state(updated_messages, agent_result.get("context", {})),
+        state=compact_state(updated_messages, agent_result.get("structured_state", structured_state)),
         usage={
             "provider": agent_result.get("provider", "stub"),
             "model": agent_result["model"],
@@ -53,5 +55,6 @@ def create_turn(session_id: str, request: ConversationTurnRequest) -> Conversati
             "prompt_tokens": agent_result.get("prompt_tokens"),
             "completion_tokens": agent_result.get("completion_tokens"),
             "intent": agent_result.get("intent", {}),
+            "tool_call": agent_result.get("context", {}).get("tool_call"),
         },
     )
