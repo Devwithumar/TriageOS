@@ -11,6 +11,8 @@ class IntentName(StrEnum):
     CAPABILITIES = "capabilities"
     GRATITUDE = "gratitude"
     PRACTICE_INFORMATION = "practice_information"
+    PROVIDER_LOOKUP = "provider_lookup"
+    UNSUPPORTED_LOCAL_SEARCH = "unsupported_local_search"
     APPOINTMENT_REQUEST = "appointment_request"
     APPOINTMENT_CHANGE = "appointment_change"
     APPOINTMENT_CANCELLATION = "appointment_cancellation"
@@ -115,6 +117,7 @@ class ConversationState(BaseModel):
     session_id: str
     workflow: WorkflowContext = Field(default_factory=lambda: WorkflowContext(name=WorkflowName.GENERAL))
     slots: dict[str, ExtractedSlot] = Field(default_factory=dict)
+    provider_options: list[dict[str, Any]] = Field(default_factory=list)
     turn_count: int = Field(default=0, ge=0)
 
 
@@ -139,4 +142,5 @@ class WorkflowDecision(BaseModel):
     next_action: str
     missing_fields: list[str] = Field(default_factory=list)
     tool_call: ToolRequest | None = None
+    tool_result: ToolResult | None = None
     response: str = Field(min_length=1)

@@ -10,15 +10,75 @@ from dataclasses import dataclass, field
 
 import httpx
 import websockets
+from pydantic import ValidationError
 
+from libs.ai.conversation_intelligence import detect_intent
+from libs.ai.llm import CompletionResult
+from libs.ai.config import LLMConfig
+from libs.ai.proposal_adapter import ProposalAdapter, ProposalAdapterError, parse_proposal_payload
+from libs.ai.proposal_adapter import ProposalCompletion
+from libs.ai.proposal_fallback import build_recovery_proposal
 from libs.conversation.contracts import (
     ConversationState,
+    DialogueAct,
     ExtractedSlot,
     IntentClassification,
     IntentName,
     ReceptionistState,
 )
+from libs.conversation.domain import (
+    CaptureSlotCommand,
+    ConversationSession,
+    ConversationState as DomainConversationState,
+    DomainInvariantError,
+    OperationName,
+    OperationRequestedEvent,
+    OperationStartedEvent,
+    OperationSucceededEvent,
+    RequestOperationCommand,
+    SlotCapturedEvent,
+    StartOperationCommand,
+    StartWorkflowCommand,
+    StaleOperationResultError,
+    TaskName,
+    TaskCancelledEvent,
+    WorkflowStartedEvent,
+    WorkflowState,
+    command_to_event,
+    reduce_session,
+    reduce_state,
+)
 from libs.conversation.workflow import apply_receptionist_turn
+from libs.conversation.transitions import TRANSITION_TABLE, transition_for
+from libs.conversation.orchestrator import ConversationOrchestrator
+from libs.conversation.persistence import (
+    InMemorySessionRepository,
+    PersistenceConflictError,
+)
+from libs.conversation.proposals import (
+    ConversationProposal,
+    ProposalConfidenceBand,
+    ProposalValidationError,
+    ProposedSlot,
+    ToolSelectionProposal,
+    validate_proposal,
+)
+from libs.conversation.tool_contracts import (
+    ProviderRecord,
+    ProviderSearchOutput,
+    SearchProvidersInput,
+    ToolContractError,
+    ToolRequest,
+    ToolResult,
+    ToolResultStatus,
+)
+from services.conversation.app.agent import (
+    _extract_location_hint,
+    _guard_generated_reply,
+    generate_reply,
+)
+from services.conversation.app.canonical_engine import CanonicalConversationEngine
+from services.conversation.app.provider_directory import Provider, ProviderSearchResult
 
 VOICE_URL = "http://localhost:8000"
 CONVERSATION_URL = "http://localhost:8001"
@@ -44,6 +104,495 @@ class Results:
         print(f"  WARN  {name} — {detail}")
 
 
+def test_domain_contracts(results: Results) -> None:
+    try:
+        state = DomainConversationState(session_id="domain_smoke")
+        state = reduce_state(
+            state,
+            WorkflowStartedEvent(
+                aggregate_id=state.session_id,
+                aggregate_version=1,
+                correlation_id="corr-domain",
+                task=TaskName.APPOINTMENT_REQUEST,
+            ),
+        )
+        state = reduce_state(
+            state,
+            SlotCapturedEvent(
+                aggregate_id=state.session_id,
+                aggregate_version=2,
+                correlation_id="corr-domain",
+                slot="location",
+                value="Lagos",
+                source="user_explicit",
+                confidence=1,
+            ),
+        )
+        state = reduce_state(
+            state,
+            OperationRequestedEvent(
+                aggregate_id=state.session_id,
+                aggregate_version=3,
+                correlation_id="corr-domain",
+                request_id="req-provider-1",
+                operation=OperationName.SEARCH_PROVIDERS,
+                requested_state_version=2,
+                idempotency_key="idem-provider-1",
+            ),
+        )
+        state = reduce_state(
+            state,
+            OperationStartedEvent(
+                aggregate_id=state.session_id,
+                aggregate_version=4,
+                correlation_id="corr-domain",
+                request_id="req-provider-1",
+            ),
+        )
+        state = reduce_state(
+            state,
+            OperationSucceededEvent(
+                aggregate_id=state.session_id,
+                aggregate_version=5,
+                correlation_id="corr-domain",
+                request_id="req-provider-1",
+                requested_state_version=2,
+            ),
+        )
+        if state.workflow_state != WorkflowState.SELECTING_PROVIDER or state.pending_operation:
+            results.fail("domain contracts", "successful provider operation did not advance state")
+            return
+        try:
+            reduce_state(
+                state,
+                OperationSucceededEvent(
+                    aggregate_id=state.session_id,
+                    aggregate_version=6,
+                    correlation_id="corr-domain",
+                    request_id="req-provider-1",
+                    requested_state_version=2,
+                ),
+            )
+            results.fail("domain contracts", "stale operation result was accepted")
+            return
+        except StaleOperationResultError:
+            pass
+        try:
+            DomainConversationState(
+                session_id="invalid-domain",
+                active_task=TaskName.APPOINTMENT_REQUEST,
+                workflow_state=WorkflowState.IDLE,
+            )
+            results.fail("domain contracts", "invalid idle state was accepted")
+            return
+        except (DomainInvariantError, ValidationError):
+            pass
+        cancelled = reduce_state(
+            state,
+            TaskCancelledEvent(
+                aggregate_id=state.session_id,
+                aggregate_version=6,
+                correlation_id="corr-domain",
+                reason="user cancelled the request",
+            ),
+        )
+        if cancelled.workflow_state != WorkflowState.CANCELLED or cancelled.active_task != TaskName.NONE:
+            results.fail("domain contracts", "cancellation did not clear the active task")
+            return
+        results.ok("domain contracts")
+    except Exception as exc:
+        results.fail("domain contracts", str(exc))
+
+
+def test_transition_table(results: Results) -> None:
+    try:
+        session = ConversationSession.create("transition_smoke")
+        start = StartWorkflowCommand(
+            session_id=session.session_id,
+            expected_state_version=0,
+            correlation_id="corr-transition",
+            task=TaskName.APPOINTMENT_REQUEST,
+        )
+        session = reduce_session(session, command_to_event(session.state, start))
+        capture = CaptureSlotCommand(
+            session_id=session.session_id,
+            expected_state_version=session.state.state_version,
+            correlation_id="corr-transition",
+            slot="location",
+            value="Lagos",
+            source="user_explicit",
+            confidence=1,
+        )
+        session = reduce_session(session, command_to_event(session.state, capture))
+        request = RequestOperationCommand(
+            session_id=session.session_id,
+            expected_state_version=session.state.state_version,
+            correlation_id="corr-transition",
+            request_id="req-transition-1",
+            operation=OperationName.SEARCH_PROVIDERS,
+            idempotency_key="idem-transition-1",
+        )
+        session = reduce_session(session, command_to_event(session.state, request))
+        start_operation = StartOperationCommand(
+            session_id=session.session_id,
+            expected_state_version=session.state.state_version,
+            correlation_id="corr-transition",
+            request_id="req-transition-1",
+        )
+        session = reduce_session(session, command_to_event(session.state, start_operation))
+        decision = transition_for(
+            session.state,
+            OperationSucceededEvent(
+                aggregate_id=session.session_id,
+                aggregate_version=session.state.state_version + 1,
+                correlation_id="corr-transition",
+                request_id="req-transition-1",
+                requested_state_version=2,
+            ),
+        )
+        if decision.target_state != WorkflowState.SELECTING_PROVIDER:
+            results.fail("transition table", "provider success transition is incorrect")
+            return
+        if len(TRANSITION_TABLE) < 10:
+            results.fail("transition table", "transition table is incomplete")
+            return
+        results.ok("transition table")
+    except Exception as exc:
+        results.fail("transition table", str(exc))
+
+
+def test_tool_and_persistence_contracts(results: Results) -> None:
+    try:
+        request = ToolRequest(
+            request_id="tool-request-1",
+            session_id="tool-session",
+            operation=OperationName.SEARCH_PROVIDERS,
+            requested_state_version=3,
+            idempotency_key="tool-idem-1",
+            correlation_id="tool-correlation-1",
+            input=SearchProvidersInput(care_setting="hospital", location="Lagos"),
+        )
+        result = ToolResult(
+            request_id=request.request_id,
+            session_id=request.session_id,
+            operation=request.operation,
+            requested_state_version=request.requested_state_version,
+            correlation_id=request.correlation_id,
+            status=ToolResultStatus.SUCCEEDED,
+            output=ProviderSearchOutput(
+                resolved_location="Lagos, Nigeria",
+                providers=[
+                    ProviderRecord(
+                        provider_id="osm:node:1",
+                        name="Verified Hospital",
+                        category="hospital",
+                        source="test-directory",
+                        observed_at=request.created_at,
+                    )
+                ],
+            ),
+        )
+        if result.output is None or result.output.tool_name != request.operation:
+            results.fail("tool and persistence contracts", "typed tool output was not preserved")
+            return
+        try:
+            ToolResult(
+                request_id=request.request_id,
+                session_id=request.session_id,
+                operation=request.operation,
+                requested_state_version=request.requested_state_version,
+                correlation_id=request.correlation_id,
+                status=ToolResultStatus.FAILED,
+            )
+            results.fail("tool and persistence contracts", "failed result without error was accepted")
+            return
+        except (ToolContractError, ValidationError):
+            pass
+
+        repository = InMemorySessionRepository()
+        session = repository.create("persist-session")
+        start_command = StartWorkflowCommand(
+            session_id=session.session_id,
+            expected_state_version=0,
+            correlation_id="persist-correlation",
+            task=TaskName.APPOINTMENT_REQUEST,
+        )
+        event = command_to_event(session.state, start_command)
+        first_commit = repository.commit(session.session_id, 0, event)
+        replay = repository.commit(session.session_id, 0, event)
+        if not replay.idempotent_replay or first_commit.session.state.state_version != 1:
+            results.fail("tool and persistence contracts", "duplicate event was not idempotent")
+            return
+        try:
+            repository.commit(session.session_id, 0, event.model_copy(update={"event_id": "different-event"}))
+            results.fail("tool and persistence contracts", "stale persistence write was accepted")
+            return
+        except PersistenceConflictError:
+            pass
+        results.ok("tool and persistence contracts")
+    except Exception as exc:
+        results.fail("tool and persistence contracts", str(exc))
+
+
+def test_proposal_validation(results: Results) -> None:
+    try:
+        state = DomainConversationState(session_id="proposal-session")
+        proposal = ConversationProposal(
+            session_id=state.session_id,
+            based_on_state_version=state.state_version,
+            correlation_id="proposal-correlation",
+            intent=IntentName.APPOINTMENT_REQUEST,
+            dialogue_act="request_information",
+            confidence_band=ProposalConfidenceBand.HIGH,
+            requested_task=TaskName.APPOINTMENT_REQUEST,
+            slots=[
+                ProposedSlot(name="care_setting", value="hospital", source="user_explicit", confidence=1),
+                ProposedSlot(name="location", value="Lagos", source="user_explicit", confidence=1),
+                ProposedSlot(name="appointment_reason", value="general consultation", source="user_explicit", confidence=1),
+            ],
+            tool_selection=ToolSelectionProposal(operation=OperationName.SEARCH_PROVIDERS),
+            response_draft="I’ll look for verified options.",
+        )
+        validated = validate_proposal(state, proposal)
+        if len(validated.commands) != 5 or [command.expected_state_version for command in validated.commands] != [0, 1, 2, 3, 4]:
+            results.fail("proposal validation", "valid proposal did not produce sequential commands")
+            return
+        for invalid in (
+            proposal.model_copy(update={"based_on_state_version": 1}),
+            proposal.model_copy(update={"confidence_band": ProposalConfidenceBand.LOW}),
+            proposal.model_copy(
+                update={
+                    "slots": [
+                        ProposedSlot(
+                            name="location",
+                            value="Lagos",
+                            source="model_inference",
+                            confidence=1,
+                        )
+                    ],
+                    "tool_selection": None,
+                }
+            ),
+        ):
+            try:
+                validate_proposal(state, invalid)
+                results.fail("proposal validation", "unsafe proposal was accepted")
+                return
+            except ProposalValidationError:
+                pass
+        results.ok("proposal validation")
+    except Exception as exc:
+        results.fail("proposal validation", str(exc))
+
+
+def test_structured_proposal_adapter(results: Results) -> None:
+    try:
+        state = DomainConversationState(session_id="adapter-session")
+        adapter = ProposalAdapter(LLMConfig(provider="stub", api_key=None, model="stub"))
+        completion = adapter.propose(
+            "I want to book an appointment",
+            state,
+            [],
+            "adapter-correlation",
+        )
+        if (
+            completion.proposal.session_id != state.session_id
+            or completion.proposal.based_on_state_version != state.state_version
+            or completion.proposal.requested_task != TaskName.APPOINTMENT_REQUEST
+        ):
+            results.fail("structured proposal adapter", "stub proposal metadata or task was incorrect")
+            return
+        valid_payload = completion.proposal.model_dump(mode="json")
+        parse_proposal_payload(
+            valid_payload,
+            session_id=state.session_id,
+            state_version=state.state_version,
+            correlation_id="adapter-correlation",
+        )
+        for invalid_payload in (
+            {**valid_payload, "session_id": "other-session"},
+            {**valid_payload, "based_on_state_version": 1},
+            {**valid_payload, "unexpected": True},
+        ):
+            try:
+                parse_proposal_payload(
+                    invalid_payload,
+                    session_id=state.session_id,
+                    state_version=state.state_version,
+                    correlation_id="adapter-correlation",
+                )
+                results.fail("structured proposal adapter", "invalid structured output was accepted")
+                return
+            except ProposalAdapterError:
+                pass
+        try:
+            parse_proposal_payload(
+                "not-json",
+                session_id=state.session_id,
+                state_version=state.state_version,
+                correlation_id="adapter-correlation",
+            )
+            results.fail("structured proposal adapter", "non-object payload was accepted")
+            return
+        except ProposalAdapterError:
+            pass
+        results.ok("structured proposal adapter")
+    except Exception as exc:
+        results.fail("structured proposal adapter", str(exc))
+
+
+def test_orchestration_pipeline(results: Results) -> None:
+    try:
+        repository = InMemorySessionRepository()
+        adapter = ProposalAdapter(LLMConfig(provider="stub", api_key=None, model="stub"))
+        orchestrator = ConversationOrchestrator(repository, adapter)
+        first = orchestrator.process_turn(
+            "orchestration-session",
+            "I want to book an appointment",
+            correlation_id="orchestration-correlation-1",
+        )
+        if (
+            not first.succeeded
+            or first.proposal is None
+            or first.validated_proposal is None
+            or len(first.events) != 2
+            or first.session.state.state_version != 2
+            or first.session.state.active_task != TaskName.APPOINTMENT_REQUEST
+            or first.events[0].event_type != "conversation.turn.received"
+            or first.events[1].event_type != "workflow.started"
+        ):
+            results.fail("orchestration pipeline", "valid turn was not committed as one event batch")
+            return
+
+        second = orchestrator.process_turn(
+            "orchestration-session",
+            "Hello, how are you?",
+            correlation_id="orchestration-correlation-2",
+        )
+        if not second.succeeded or len(second.events) != 1 or second.session.state.state_version != 3:
+            results.fail("orchestration pipeline", "turn without a state mutation was not committed")
+            return
+
+        replay = repository.commit_batch("orchestration-session", 0, list(first.events))
+        if not replay.idempotent_replay or replay.session.state.state_version != 3:
+            results.fail("orchestration pipeline", "complete batch replay was not idempotent")
+            return
+
+        repository = InMemorySessionRepository()
+        session = repository.create("atomic-session")
+        valid_turn = first.events[0].model_copy(
+            update={
+                "aggregate_id": session.session_id,
+                "aggregate_version": 1,
+            }
+        )
+        invalid_follow_up = valid_turn.model_copy(
+            update={"event_id": "invalid-follow-up", "aggregate_version": 99}
+        )
+        try:
+            repository.commit_batch(session.session_id, 0, [valid_turn, invalid_follow_up])
+            results.fail("orchestration pipeline", "invalid batch was partially committed")
+            return
+        except PersistenceConflictError:
+            pass
+        if repository.load(session.session_id).state.state_version != 0 or repository.events(session.session_id):
+            results.fail("orchestration pipeline", "failed batch changed the session")
+            return
+        results.ok("orchestration pipeline")
+    except Exception as exc:
+        results.fail("orchestration pipeline", str(exc))
+
+
+def test_canonical_conversation_engine(results: Results) -> None:
+    class FakeProposalSource:
+        def propose(self, user_text, state, recent_messages, correlation_id):
+            normalized = user_text.lower()
+            slots = []
+            if "veterinary" in normalized:
+                slots.append(ProposedSlot(name="care_setting", value="veterinary care", source="user_explicit", confidence=1))
+            if "lagos" in normalized:
+                slots.append(ProposedSlot(name="location", value="Lagos", source="user_explicit", confidence=1))
+            if "cough" in normalized:
+                slots.append(ProposedSlot(name="appointment_reason", value="persistent cough", source="user_explicit", confidence=1))
+            task = TaskName.APPOINTMENT_REQUEST if "appointment" in normalized or state.active_task == TaskName.APPOINTMENT_REQUEST else TaskName.NONE
+            proposal = ConversationProposal(
+                session_id=state.session_id,
+                based_on_state_version=state.state_version,
+                correlation_id=correlation_id,
+                intent=IntentName.APPOINTMENT_REQUEST if task != TaskName.NONE else IntentName.GENERAL_CONVERSATION,
+                dialogue_act=DialogueAct.INFORM,
+                confidence_band=ProposalConfidenceBand.HIGH,
+                requested_task=task,
+                slots=slots,
+            )
+            return ProposalCompletion(proposal=proposal, model="fake", provider="fake")
+
+    class FakeProviderDirectory:
+        def search(self, care_setting, location, reason=None):
+            return ProviderSearchResult(
+                location=location,
+                source="fake-directory",
+                providers=[
+                    Provider(
+                        provider_id="fake:1",
+                        name="Verified Test Clinic",
+                        address="1 Test Street, Lagos",
+                        category=care_setting,
+                        latitude=0,
+                        longitude=0,
+                        distance_km=1.2,
+                    )
+                ],
+            )
+
+    try:
+        engine = CanonicalConversationEngine(FakeProposalSource(), FakeProviderDirectory())
+        session_id = "canonical-engine-smoke"
+        first = engine.handle_turn(session_id, "I want to book an appointment")
+        second = engine.handle_turn(session_id, "veterinary care")
+        third = engine.handle_turn(session_id, "Lagos")
+        fourth = engine.handle_turn(session_id, "It is for a persistent cough")
+        cancelled = engine.handle_turn(session_id, "Never mind the appointment")
+        urgent = engine.handle_turn("canonical-safety-smoke", "I have chest pain right now")
+        if (
+            "kind of care" not in first.reply.lower()
+            or "postal code" not in second.reply.lower()
+            or "visit" not in third.reply.lower()
+            or "verified test clinic" not in fourth.reply.lower()
+            or "stopped" not in cancelled.reply.lower()
+            or "emergency" not in urgent.reply.lower()
+            or cancelled.state["structured_state"].get("appointment_status") != "cancelled"
+        ):
+            results.fail(
+                "canonical conversation engine",
+                f"canonical workflow did not progress safely: replies={[first.reply, second.reply, third.reply, fourth.reply, cancelled.reply, urgent.reply]} state={cancelled.state}",
+            )
+            return
+        results.ok("canonical conversation engine")
+    except Exception as exc:
+        results.fail("canonical conversation engine", str(exc))
+
+
+def test_provider_lookup_boundary(results: Results) -> None:
+    try:
+        proposal = build_recovery_proposal(
+            "Find a hospital near Abuja, Nigeria.",
+            DomainConversationState(session_id="provider-lookup-boundary"),
+            "provider-lookup-correlation",
+        )
+        slots = {slot.name: slot.value for slot in proposal.slots}
+        if (
+            proposal.intent == IntentName.PROVIDER_LOOKUP
+            and proposal.requested_task == TaskName.PROVIDER_LOOKUP
+            and slots == {"care_setting": "hospital", "location": "Abuja, Nigeria"}
+        ):
+            results.ok("provider lookup boundary")
+        else:
+            results.fail("provider lookup boundary", f"unexpected proposal={proposal}")
+    except Exception as exc:
+        results.fail("provider lookup boundary", str(exc))
+
+
 def test_workflow_contracts(results: Results) -> None:
     try:
         state = ConversationState(session_id="workflow_smoke")
@@ -51,27 +600,93 @@ def test_workflow_contracts(results: Results) -> None:
         entities = {
             name: ExtractedSlot(value=value, confidence=1)
             for name, value in {
-                "caller_name": "Alex Johnson",
-                "callback_number": "08098765432",
-                "preferred_time": "Tuesday afternoon",
+                "care_setting": "primary care clinic",
+                "location": "Lagos",
                 "appointment_reason": "general consultation",
             }.items()
         }
         review = apply_receptionist_turn(state, intent, entities)
-        confirmed = apply_receptionist_turn(
+        review.state.provider_options = [
+            {
+                "provider_id": "osm:node:123",
+                "name": "Example Clinic",
+                "address": "1 Main Street",
+            }
+        ]
+        review.state.workflow.next_action = "select_provider"
+        selected = apply_receptionist_turn(
             review.state,
-            IntentClassification(name=IntentName.CONFIRMATION, confidence=1),
+            IntentClassification(name=IntentName.GENERAL_CONVERSATION, confidence=1),
+            {
+                "provider_name": ExtractedSlot(value="Example Clinic", confidence=1),
+                "provider_id": ExtractedSlot(value="osm:node:123", confidence=1),
+            },
         )
         if (
-            review.state.workflow.state == ReceptionistState.REVIEWING_REQUEST
-            and confirmed.tool_call
-            and confirmed.tool_call.name == "create_appointment_request"
+            review.state.workflow.state == ReceptionistState.COLLECTING_DETAILS
+            and review.next_action == "search_providers"
+            and review.tool_call
+            and review.tool_call.name == "search_providers"
+            and "caller_name" not in review.state.slots
+            and selected.next_action == "collect_preferred_time"
         ):
             results.ok("workflow contract transitions")
         else:
             results.fail("workflow contract transitions", "unexpected workflow decision")
     except Exception as exc:
         results.fail("workflow contract transitions", str(exc))
+
+
+def test_factual_routing_boundaries(results: Results) -> None:
+    cases = [
+        ("What is a good nearby hospital I could go to?", "provider_lookup", "city"),
+        ("Someone told me about a clinic called Vetlane. How close is it to me?", "provider_lookup", "verify Vetlane"),
+        ("Is there a nearby supermarket?", "unsupported_local_search", "healthcare-related"),
+    ]
+    intent_cases = [
+        ("What services can TriageOS help with today?", "capabilities"),
+        ("What can you help me with?", "capabilities"),
+        ("What services does the clinic offer?", "practice_information"),
+        ("Does the hospital accept insurance?", "practice_information"),
+    ]
+    try:
+        for text, expected_intent in intent_cases:
+            intent = detect_intent(text)
+            if intent.name != expected_intent:
+                results.fail("factual routing boundaries", f"misclassified {text}: {intent}")
+                return
+        for text, expected_intent, expected_phrase in cases:
+            intent = detect_intent(text)
+            response = generate_reply(text, [], {})
+            if intent.name != expected_intent or expected_phrase.lower() not in response["reply"].lower():
+                results.fail("factual routing boundaries", f"unexpected result for {text}: {response}")
+                return
+        guarded = _guard_generated_reply(
+            CompletionResult(
+                text="I can give directions to our clinic.",
+                model="test",
+                provider="test",
+                reason="test",
+            ),
+            {},
+        )
+        if guarded.provider != "policy" or "verified practice" not in guarded.text.lower():
+            results.fail("factual routing boundaries", f"unverified claim was not suppressed: {guarded}")
+            return
+        if _extract_location_hint("I need a hospital near Garki, Abuja") != "Garki, Abuja":
+            results.fail("factual routing boundaries", "comma-separated location was not extracted")
+            return
+        if _extract_location_hint(
+            "I live within central area, Abuja, Nigeria, so just somewhere good."
+        ) != "central area, Abuja, Nigeria":
+            results.fail("factual routing boundaries", "location sentence was not cleaned")
+            return
+        if _extract_location_hint("I need a clinic near me") is not None:
+            results.fail("factual routing boundaries", "near me was treated as a literal location")
+            return
+        results.ok("factual routing boundaries")
+    except Exception as exc:
+        results.fail("factual routing boundaries", str(exc))
 
 
 async def recv_json(ws: websockets.ClientConnection, timeout: float = 5.0) -> dict:
@@ -167,10 +782,8 @@ async def test_receptionist_appointment_flow(results: Results) -> None:
     session_id = f"receptionist_{uuid.uuid4()}"
     turns = [
         "I need to book an appointment",
-        "My name is Jane Doe",
-        "08012345678 tomorrow morning",
-        "general consultation",
-        "yes",
+        "veterinary care",
+        "Lagos",
     ]
     async with httpx.AsyncClient() as client:
         try:
@@ -188,16 +801,50 @@ async def test_receptionist_appointment_flow(results: Results) -> None:
             usage = body.get("usage", {})
             if (
                 usage.get("provider") == "workflow"
-                and usage.get("tool_call", {}).get("name") == "create_appointment_request"
-                and state.get("appointment_status") == "confirmed"
-                and state.get("caller_name") == "Jane Doe"
-                and state.get("callback_number") == "08012345678"
+                and state.get("appointment_status") == "collecting_details"
+                and state.get("care_setting") == "veterinary care"
+                and state.get("location") == "Lagos"
+                and state.get("next_action") == "collect_appointment_reason"
+                and "caller_name" not in state
             ):
-                results.ok("receptionist appointment request")
+                results.ok("receptionist appointment context")
             else:
-                results.fail("receptionist appointment request", f"unexpected response: {body}")
+                results.fail("receptionist appointment context", f"unexpected response: {body}")
         except Exception as exc:
             results.fail("receptionist appointment request", str(exc))
+
+
+async def test_receptionist_quality_boundaries(results: Results) -> None:
+    async with httpx.AsyncClient() as client:
+        try:
+            appointment_session = f"clarification_{uuid.uuid4()}"
+            for text in [
+                "I need to book an appointment",
+                "veterinary care",
+                "What clinic are you talking about?",
+            ]:
+                clarification_response = await client.post(
+                    f"{CONVERSATION_URL}/v1/conversations/{appointment_session}/turn",
+                    json={"session_id": appointment_session, "text": text},
+                    timeout=10,
+                )
+                clarification_response.raise_for_status()
+            clarification_body = clarification_response.json()
+            clarification_reply = clarification_body.get("reply", "").lower()
+
+            if (
+                "appointment context" in clarification_reply
+                and "caller name" not in clarification_reply
+                and "caller_name" not in clarification_body.get("state", {}).get("structured_state", {})
+            ):
+                results.ok("receptionist provider and clarification boundaries")
+            else:
+                results.fail(
+                    "receptionist provider and clarification boundaries",
+                    f"unexpected clarification={clarification_body}",
+                )
+        except Exception as exc:
+            results.fail("receptionist domain and clarification boundaries", str(exc))
 
 
 async def test_websocket_session_lifecycle(results: Results) -> None:
@@ -430,12 +1077,22 @@ async def main() -> int:
     results = Results()
     print("\nTriageOS Voice and Receptionist Smoke Tests\n" + "=" * 44)
 
+    test_domain_contracts(results)
+    test_transition_table(results)
+    test_tool_and_persistence_contracts(results)
+    test_proposal_validation(results)
+    test_structured_proposal_adapter(results)
+    test_orchestration_pipeline(results)
+    test_canonical_conversation_engine(results)
+    test_provider_lookup_boundary(results)
     test_workflow_contracts(results)
+    test_factual_routing_boundaries(results)
     await test_health(results)
     await test_web_client(results)
     await test_conversation_turn(results)
     await test_urgent_safety_response(results)
     await test_receptionist_appointment_flow(results)
+    await test_receptionist_quality_boundaries(results)
     await test_websocket_session_lifecycle(results)
     await test_websocket_partial_transcript(results)
     await test_websocket_audio_chunk_ack(results)

@@ -1,0 +1,29 @@
+{
+  "default_profile": "general",
+  "profiles": {
+    "general": {
+      "aliases": ["human", "medical", "doctor", "primary care", "clinic", "healthcare"],
+      "filters": [
+        ["amenity", ["clinic", "doctors", "hospital"]],
+        ["healthcare", ["clinic", "doctor", "hospital"]]
+      ],
+      "name_pattern": "clinic|doctor|hospital|medical|health"
+    },
+    "veterinary": {
+      "aliases": ["veterinary", "vet", "animal", "pet"],
+      "filters": [
+        ["amenity", ["veterinary"]],
+        ["healthcare", ["veterinary"]]
+      ],
+      "name_pattern": "veterinary|veterinarian|vet|animal|pet"
+    },
+    "dental": {
+      "aliases": ["dentist", "dental"],
+      "filters": [
+        ["amenity", ["dentist"]],
+        ["healthcare", ["dentist"]]
+      ],
+      "name_pattern": "dentist|dental"
+    }
+  }
+}

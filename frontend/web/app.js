@@ -38,6 +38,7 @@ let analyser;
 let visualizerFrame;
 let visualizerStream;
 let availableVoices = [];
+let speechQueue = [];
 
 const maxReconnectAttempts = 5;
 
@@ -159,22 +160,41 @@ function sendEvent(event, payload = {}) {
 }
 
 function stopSpeaking() {
+  speechQueue = [];
   window.speechSynthesis.cancel();
   speakingTurnId = null;
 }
 
 function preferredVoice(voices) {
   const preferredNames = [
-    "Microsoft Aria",
-    "Microsoft Jenny",
     "Google US English",
+    "Google UK English Female",
+    "Google UK English Male",
     "Samantha",
     "Ava",
     "Karen",
+    "Daniel",
+    "Alex",
+    "Microsoft Aria",
+    "Microsoft Jenny",
   ];
   return preferredNames
     .map((name) => voices.find((voice) => voice.name.toLowerCase().includes(name.toLowerCase())))
     .find(Boolean) || voices.find((voice) => voice.lang.toLowerCase().startsWith("en"));
+}
+
+function speechChunks(text) {
+  const normalizedText = text.replace(/\s+/g, " ").trim();
+  if (!normalizedText) {
+    return [];
+  }
+
+  if (typeof Intl.Segmenter === "function") {
+    const segmenter = new Intl.Segmenter("en", { granularity: "sentence" });
+    return [...segmenter.segment(normalizedText)].map(({ segment }) => segment.trim()).filter(Boolean);
+  }
+
+  return [normalizedText];
 }
 
 function refreshVoices() {
@@ -198,29 +218,49 @@ function logLatency(turnId, label, ms, extra = {}) {
 function speak(text, turnId) {
   stopSpeaking();
   speakingTurnId = turnId;
+  speechQueue = speechChunks(text);
+  speakNextChunk(turnId);
+}
 
-  const utterance = new SpeechSynthesisUtterance(text);
+function speakNextChunk(turnId) {
+  if (speakingTurnId !== turnId) {
+    return;
+  }
+
+  const nextChunk = speechQueue.shift();
+  if (!nextChunk) {
+    speakingTurnId = null;
+    setActivity("ready", "Ready", "Press Start Talking or type a message.");
+    hint.textContent = "Ready for your next message.";
+    return;
+  }
+
+  const utterance = new SpeechSynthesisUtterance(nextChunk);
   const selectedVoice = voiceSelect.value === "auto"
     ? preferredVoice(availableVoices)
     : availableVoices.find((voice) => voice.name === voiceSelect.value);
   utterance.voice = selectedVoice || null;
-  utterance.rate = 0.96;
-  utterance.pitch = 1.04;
-  utterance.volume = 0.9;
+  utterance.lang = selectedVoice?.lang || "en-US";
+  utterance.rate = 0.92;
+  utterance.pitch = 1.0;
+  utterance.volume = 1.0;
 
-  let ttsStartedAt = 0;
   utterance.onstart = () => {
-    ttsStartedAt = performance.now();
+    logLatency(turnId, "tts_first_chunk_ms", Math.round(performance.now() - lastTurnStartedAt));
   };
   utterance.onend = () => {
     if (speakingTurnId !== turnId) {
       return;
     }
-    const ttsMs = Math.round(performance.now() - ttsStartedAt);
-    logLatency(turnId, "tts_ms", ttsMs);
+    window.setTimeout(() => speakNextChunk(turnId), 100);
+  };
+  utterance.onerror = (event) => {
+    if (speakingTurnId !== turnId || event.error === "canceled") {
+      return;
+    }
+    speechQueue = [];
     speakingTurnId = null;
     setActivity("ready", "Ready", "Press Start Talking or type a message.");
-    hint.textContent = "Ready for your next message.";
   };
 
   window.speechSynthesis.speak(utterance);

@@ -119,6 +119,18 @@ Every turn should converge on a structure equivalent to:
 
 The response is an output of the orchestration decision, not the source of truth.
 
+### Appointment Context Before Identity
+
+An appointment conversation must establish what is being requested before collecting personal details. The workflow first captures the care setting, location, and reason for the visit. It then emits a typed `search_providers` request. Only after a provider is returned or explicitly selected may it collect preferred time, caller name, and callback information.
+
+The provider directory is a data source, not a prompt instruction. Until a directory or scheduling integration is connected, TriageOS must say that it cannot suggest a clinic and must not invent a provider, location, availability, or appointment request. Questions and topic changes must preserve the current state without turning the user's entire message into an appointment field.
+
+The local MVP provider adapter uses a configurable OpenStreetMap geocoder, Overpass search, and a filtered Nominatim place-search fallback when Overpass is unavailable. It keeps results server-side, caches repeated searches, rejects non-healthcare landmarks, limits results to the configured radius, and returns source metadata. This is discovery only; it does not verify clinical quality or create an appointment. A production deployment should replace or supplement it with a governed provider directory and scheduling integration.
+
+### Factual Claims Firewall
+
+Free-form generation must not answer live-location or practice-fact questions. Requests involving providers, addresses, phone numbers, ratings, distances, travel times, opening hours, or directions route through a typed lookup tool. The response layer may render only returned tool data and source metadata. If lookup fails or returns no match, it must state that the information could not be verified; it must not infer a plausible provider or address. User corrections remain conversation content and cannot change TriageOS identity, scope, or capabilities.
+
 ## RAG Decision
 
 RAG is not required for the first receptionist slice. We should use structured practice configuration for hours, location, contact information, services, and insurance policies.
