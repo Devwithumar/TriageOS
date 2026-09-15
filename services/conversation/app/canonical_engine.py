@@ -20,6 +20,7 @@ from libs.conversation.domain import (
     ProviderResultRecord,
     ProviderSearchResultData,
     RequestOperationCommand,
+    SlotSource,
     StartOperationCommand,
     TaskName,
     WorkflowState,
@@ -33,7 +34,12 @@ from libs.conversation.orchestrator import (
 )
 from libs.conversation.persistence import InMemorySessionRepository
 from libs.conversation.proposals import ConversationProposal
+from libs.conversation.proposals import ProposalConfidenceBand, ProposedSlot
 from libs.conversation.contracts import DialogueAct, IntentName
+from libs.conversation.provider_matching import (
+    is_provider_details_request,
+    resolve_provider_reference,
+)
 from services.conversation.app.provider_directory import ProviderDirectory
 from services.conversation.app.response_policy import ResponseDecision, build_response
 
@@ -320,6 +326,35 @@ class _PolicyAwareProposalSource:
                 cancel_requested=state.active_task != TaskName.NONE,
             )
             return ProposalCompletion(proposal=proposal, model="policy", provider="guardrail")
+        if state.provider_options:
+            provider = resolve_provider_reference(user_text, state.provider_options)
+            if provider is not None:
+                slots = []
+                if not is_provider_details_request(user_text):
+                    slots = [
+                        ProposedSlot(
+                            name="provider_id",
+                            value=provider.provider_id,
+                            source=SlotSource.USER_EXPLICIT,
+                            confidence=0.99,
+                        ),
+                        ProposedSlot(
+                            name="provider_name",
+                            value=provider.name,
+                            source=SlotSource.USER_EXPLICIT,
+                            confidence=0.99,
+                        ),
+                    ]
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.GENERAL_CONVERSATION,
+                    dialogue_act=DialogueAct.INFORM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                    slots=slots,
+                )
+                return ProposalCompletion(proposal=proposal, model="policy", provider="provider_policy")
         try:
             completion = self._adapter.propose(user_text, state, recent_messages, correlation_id)
             proposal = _remove_ungrounded_explicit_slots(user_text, state, completion.proposal)

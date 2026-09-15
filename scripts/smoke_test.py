@@ -35,6 +35,7 @@ from libs.conversation.domain import (
     OperationRequestedEvent,
     OperationStartedEvent,
     OperationSucceededEvent,
+    ProviderResultRecord,
     RequestOperationCommand,
     SlotCapturedEvent,
     StartOperationCommand,
@@ -63,6 +64,7 @@ from libs.conversation.proposals import (
     ToolSelectionProposal,
     validate_proposal,
 )
+from libs.conversation.provider_matching import resolve_provider_reference
 from libs.conversation.tool_contracts import (
     ProviderRecord,
     ProviderSearchOutput,
@@ -593,6 +595,35 @@ def test_provider_lookup_boundary(results: Results) -> None:
         results.fail("provider lookup boundary", str(exc))
 
 
+def test_provider_option_matching(results: Results) -> None:
+    try:
+        options = [
+            ProviderResultRecord(
+                provider_id="provider:1",
+                name="Eye Foundation Hospital",
+                address="648 Mobolaji Johnson Street, Abuja",
+                category="hospital",
+            ),
+            ProviderResultRecord(
+                provider_id="provider:2",
+                name="CedarCrest Abuja Hospital",
+                address="2 Ahmad Daku Street, Abuja",
+                category="hospital",
+            ),
+        ]
+        references = (
+            "cedar crest sounds good",
+            "I would like to use option number 2",
+            "can you get me more details about cedarcrest abuja",
+        )
+        if all(resolve_provider_reference(text, options) == options[1] for text in references):
+            results.ok("provider option matching")
+        else:
+            results.fail("provider option matching", "informal provider references did not resolve")
+    except Exception as exc:
+        results.fail("provider option matching", str(exc))
+
+
 def test_workflow_contracts(results: Results) -> None:
     try:
         state = ConversationState(session_id="workflow_smoke")
@@ -1085,6 +1116,7 @@ async def main() -> int:
     test_orchestration_pipeline(results)
     test_canonical_conversation_engine(results)
     test_provider_lookup_boundary(results)
+    test_provider_option_matching(results)
     test_workflow_contracts(results)
     test_factual_routing_boundaries(results)
     await test_health(results)

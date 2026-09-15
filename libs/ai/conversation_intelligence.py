@@ -82,6 +82,9 @@ LOCAL_LOOKUP_MARKERS = (
     " near ",
     "near me",
     "close to me",
+    "close to where",
+    "near where",
+    "where i live",
     "closest",
     "nearest",
     "where is",
@@ -145,6 +148,8 @@ def detect_intent(text: str) -> ConversationIntent:
             "forget about the appointment",
             "forget the appointment",
             "never mind the appointment",
+            "never mind",
+            "start over",
             "let's talk about something else",
             "lets talk about something else",
         )

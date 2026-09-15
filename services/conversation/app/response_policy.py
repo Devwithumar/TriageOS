@@ -4,12 +4,18 @@ from dataclasses import dataclass
 
 from libs.conversation.domain import (
     ConversationState,
+    OperationSucceededEvent,
     ProviderSearchResultData,
+    SlotCapturedEvent,
     TaskName,
     WorkflowState,
 )
 from libs.conversation.proposals import ConversationProposal
 from libs.conversation.orchestrator import OrchestrationResult
+from libs.conversation.provider_matching import (
+    is_provider_details_request,
+    resolve_provider_reference,
+)
 
 
 @dataclass(frozen=True)
@@ -85,9 +91,17 @@ def build_response(result: OrchestrationResult) -> ResponseDecision:
             reason="task cancelled",
         )
 
-    operation_response = _operation_response(state)
+    operation_response = _operation_response(result)
     if operation_response:
         return operation_response
+
+    provider_details = _provider_details_response(result)
+    if provider_details:
+        return provider_details
+
+    provider_selection = _provider_selection_response(result)
+    if provider_selection:
+        return provider_selection
 
     if state.active_task != TaskName.NONE:
         workflow_response = _workflow_response(state)
@@ -97,7 +111,10 @@ def build_response(result: OrchestrationResult) -> ResponseDecision:
     return _general_response(proposal)
 
 
-def _operation_response(state: ConversationState) -> ResponseDecision | None:
+def _operation_response(result: OrchestrationResult) -> ResponseDecision | None:
+    state = result.session.state
+    if not any(isinstance(event, OperationSucceededEvent) for event in result.events):
+        return None
     result = state.last_operation_result
     if isinstance(result, ProviderSearchResultData):
         if result.providers:
@@ -139,6 +156,65 @@ def _operation_response(state: ConversationState) -> ResponseDecision | None:
             reason="provider search pending",
         )
     return None
+
+
+def _provider_details_response(result: OrchestrationResult) -> ResponseDecision | None:
+    state = result.session.state
+    if not state.provider_options:
+        return None
+    if not is_provider_details_request(result.turn_event.text):
+        return None
+    provider = resolve_provider_reference(result.turn_event.text, state.provider_options)
+    if provider is None:
+        selected_provider_id = state.slots.get("provider_id")
+        if selected_provider_id:
+            provider = next(
+                (
+                    option
+                    for option in state.provider_options
+                    if option.provider_id == selected_provider_id.value
+                ),
+                None,
+            )
+    if provider is None:
+        return None
+    details = [f"{provider.name} is listed at {provider.address}" if provider.address else provider.name]
+    if provider.phone:
+        details.append(f"Phone: {provider.phone}")
+    if provider.website:
+        details.append(f"Website: {provider.website}")
+    return ResponseDecision(
+        text=(
+            "Here are the verified directory details I have: "
+            + ". ".join(details)
+            + ". Would you like to use this provider?"
+        ),
+        provider="provider_directory",
+        reason="rendered verified provider details",
+    )
+
+
+def _provider_selection_response(result: OrchestrationResult) -> ResponseDecision | None:
+    if not any(
+        isinstance(event, SlotCapturedEvent) and event.slot in {"provider_id", "provider_name"}
+        for event in result.events
+    ):
+        return None
+    provider_name = result.session.state.slots.get("provider_name")
+    if provider_name is None:
+        return None
+    if result.session.state.active_task == TaskName.APPOINTMENT_REQUEST:
+        text = f"Great, I’ve selected {provider_name.value}. What day or time would you prefer?"
+    else:
+        text = (
+            f"Great, I’ve selected {provider_name.value}. Would you like more details, "
+            "or would you like help preparing an appointment request?"
+        )
+    return ResponseDecision(
+        text=text,
+        provider="workflow",
+        reason="provider selection acknowledged",
+    )
 
 
 def _workflow_response(state: ConversationState) -> ResponseDecision | None:

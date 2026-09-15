@@ -5,6 +5,7 @@ import re
 from libs.ai.conversation_intelligence import detect_intent
 from libs.conversation.contracts import DialogueAct, IntentName
 from libs.conversation.domain import ConversationState, SlotSource, TaskName, WorkflowState
+from libs.conversation.provider_matching import resolve_provider_reference
 from libs.conversation.proposals import (
     ConversationProposal,
     ProposalConfidenceBand,
@@ -187,30 +188,7 @@ def _extract_value(text: str, slot_name: str) -> str | None:
 
 
 def _select_provider(user_text: str, state: ConversationState) -> list[ProposedSlot]:
-    normalized = user_text.lower().strip()
-    ordinal_indexes = {
-        "first": 0,
-        "1": 0,
-        "one": 0,
-        "second": 1,
-        "2": 1,
-        "two": 1,
-        "third": 2,
-        "3": 2,
-        "three": 2,
-    }
-    selected_index = next(
-        (index for token, index in ordinal_indexes.items() if re.search(rf"\b{re.escape(token)}\b", normalized)),
-        None,
-    )
-    selected = None
-    if selected_index is not None and selected_index < len(state.provider_options):
-        selected = state.provider_options[selected_index]
-    else:
-        for option in state.provider_options:
-            if option.name.lower() in normalized:
-                selected = option
-                break
+    selected = resolve_provider_reference(user_text, state.provider_options)
     if selected is None:
         return []
     return [
