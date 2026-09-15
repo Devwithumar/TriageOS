@@ -323,9 +323,17 @@ class _PolicyAwareProposalSource:
                 intent=IntentName.APPOINTMENT_CANCELLATION,
                 dialogue_act=DialogueAct.CANCEL,
                 confidence_band="high",
-                cancel_requested=state.active_task != TaskName.NONE,
+                cancel_requested=True,
             )
             return ProposalCompletion(proposal=proposal, model="policy", provider="guardrail")
+        if detected.name == "correction":
+            recovery = build_recovery_proposal(user_text, state, correlation_id)
+            if recovery.corrections:
+                return ProposalCompletion(
+                    proposal=recovery,
+                    model="policy",
+                    provider="correction_policy",
+                )
         if state.provider_options:
             provider = resolve_provider_reference(user_text, state.provider_options)
             if provider is not None:

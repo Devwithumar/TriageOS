@@ -9,6 +9,7 @@ from libs.conversation.provider_matching import resolve_provider_reference
 from libs.conversation.proposals import (
     ConversationProposal,
     ProposalConfidenceBand,
+    ProposedCorrection,
     ProposedSlot,
 )
 
@@ -35,6 +36,17 @@ def build_recovery_proposal(
     """Recover only explicit, low-risk task transitions from the current state."""
 
     detected = detect_intent(user_text)
+    corrections = _extract_corrections(user_text, state)
+    if detected.name == IntentName.CORRECTION.value:
+        return ConversationProposal(
+            session_id=state.session_id,
+            based_on_state_version=state.state_version,
+            correlation_id=correlation_id,
+            intent=IntentName.CORRECTION,
+            dialogue_act=DialogueAct.CORRECT if corrections else DialogueAct.REQUEST_INFORMATION,
+            confidence_band=ProposalConfidenceBand.HIGH,
+            corrections=corrections,
+        )
     requested_task = _requested_task(state, detected.name)
     slots = _extract_explicit_slots(user_text, state, requested_task)
     dialogue_act = DialogueAct.INFORM if slots else DialogueAct.REQUEST_INFORMATION
@@ -205,6 +217,89 @@ def _select_provider(user_text: str, state: ConversationState) -> list[ProposedS
             confidence=0.96,
         ),
     ]
+
+
+def _extract_corrections(
+    user_text: str,
+    state: ConversationState,
+) -> list[ProposedCorrection]:
+    normalized = " ".join(user_text.lower().split())
+    corrections: list[ProposedCorrection] = []
+
+    if state.provider_options and state.slots.get("provider_id"):
+        selected = resolve_provider_reference(user_text, state.provider_options)
+        if selected is not None:
+            corrections.extend(
+                [
+                    ProposedCorrection(name="provider_id", value=selected.provider_id),
+                    ProposedCorrection(name="provider_name", value=selected.name),
+                ]
+            )
+            return corrections
+
+    labeled_patterns = {
+        "care_setting": r"(?:care|provider|specialty|clinic type)\s*(?:is|should be|to|=)?\s*(?P<value>[^?.!]+)",
+        "location": r"(?:location|city|area|neighborhood|postal code|zip code|postcode)\s*(?:is|should be|to|=)?\s*(?P<value>[^?.!]+)",
+        "appointment_reason": r"(?:appointment reason|reason for (?:the )?visit|visit reason)\s*(?:is|should be|to|=)?\s*(?P<value>[^?.!]+)",
+        "preferred_time": r"(?:appointment time|preferred time|date|time)\s*(?:is|should be|to|=)?\s*(?P<value>[^?.!]+)",
+        "caller_name": r"(?:my name|caller name)\s*(?:is|should be|to|=)?\s*(?P<value>[^?.!]+)",
+        "callback_number": r"(?:callback number|phone number)\s*(?:is|should be|to|=)?\s*(?P<value>[^?.!]+)",
+    }
+    for slot_name, pattern in labeled_patterns.items():
+        match = re.search(pattern, user_text, re.IGNORECASE)
+        if match and slot_name in state.slots:
+            value = _clean_correction_value(match.group("value"))
+            if value:
+                return [ProposedCorrection(name=slot_name, value=value)]
+
+    provider_correction = re.search(
+        r"(?:not|no)\s+(?:a|an)?\s*(?:hospital|clinic|doctor|dentist|pharmacy|vet|veterinary)[^?.!]*"
+        r"(?:i mean|rather|instead)\s+(?:a|an)?\s*(?P<value>[^?.!]+)",
+        user_text,
+        re.IGNORECASE,
+    )
+    if provider_correction and "care_setting" in state.slots:
+        value = _clean_correction_value(provider_correction.group("value"))
+        if value:
+            return [ProposedCorrection(name="care_setting", value=value)]
+
+    implied_match = re.search(
+        r"(?:actually\s*,?\s*)?(?:i meant|change that to|change it to)\s+(?P<value>[^?.!]+)",
+        user_text,
+        re.IGNORECASE,
+    )
+    if implied_match:
+        value = _clean_correction_value(implied_match.group("value"))
+        target = _infer_correction_target(value, state)
+        if target and value:
+            return [ProposedCorrection(name=target, value=value)]
+
+    if "instead" in normalized:
+        value_match = re.search(r"(?:actually\s*,?\s*)?(?:i want|i need|use)\s+(?P<value>[^?.!]+)", user_text, re.IGNORECASE)
+        if value_match:
+            value = _clean_correction_value(value_match.group("value"))
+            target = _infer_correction_target(value, state)
+            if target and value:
+                return [ProposedCorrection(name=target, value=value)]
+    return corrections
+
+
+def _infer_correction_target(value: str, state: ConversationState) -> str | None:
+    normalized = value.lower()
+    provider_terms = ("clinic", "hospital", "doctor", "dentist", "pharmacy", "vet", "veterinary")
+    if any(term in normalized for term in provider_terms) and "care_setting" in state.slots:
+        return "care_setting"
+    if "location" in state.slots:
+        return "location"
+    if "appointment_reason" in state.slots:
+        return "appointment_reason"
+    if "preferred_time" in state.slots:
+        return "preferred_time"
+    return None
+
+
+def _clean_correction_value(value: str) -> str:
+    return re.sub(r"\s+(?:instead|now)\s*$", "", value.strip(" .,;:"))
 
 
 def _intent_name(value: str) -> IntentName:

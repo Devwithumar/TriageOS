@@ -196,7 +196,7 @@ def validate_proposal(
     if cancellation_requested:
         if any((proposal.slots, proposal.corrections, proposal.tool_selection)) or proposal.requested_task != TaskName.NONE:
             raise ProposalValidationError("cancellation cannot be combined with other state changes")
-        if state.active_task == TaskName.NONE:
+        if not _has_cancellable_context(state):
             return ValidatedProposal(
                 proposal_id=proposal.proposal_id,
                 session_id=proposal.session_id,
@@ -320,4 +320,18 @@ def _cancel_command(state: ConversationState, proposal: ConversationProposal) ->
         expected_state_version=state.state_version,
         correlation_id=proposal.correlation_id,
         reason="user requested cancellation",
+    )
+
+
+def _has_cancellable_context(state: ConversationState) -> bool:
+    return bool(
+        state.active_task != TaskName.NONE
+        or state.workflow_state not in {
+            WorkflowState.IDLE,
+            WorkflowState.CANCELLED,
+        }
+        or state.slots
+        or state.provider_options
+        or state.pending_operation
+        or state.last_operation_result
     )

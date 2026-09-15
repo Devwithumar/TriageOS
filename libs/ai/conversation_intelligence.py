@@ -159,7 +159,7 @@ def detect_intent(text: str) -> ConversationIntent:
         return ConversationIntent("appointment_change", 0.96, topic, True)
     if any(phrase in normalized for phrase in ("yes", "confirm", "looks good", "that's correct", "that is correct")):
         return ConversationIntent("confirmation", 0.9, topic, False)
-    if any(phrase in normalized for phrase in ("actually", "change that", "correct that", "i meant")):
+    if any(phrase in normalized for phrase in ("actually", "change that", "correct that", "i meant", "i mean")):
         return ConversationIntent("correction", 0.88, topic, True)
     if any(term in normalized for term in RECEPTIONIST_TERMS):
         return ConversationIntent("appointment_request", 0.96, topic, True)

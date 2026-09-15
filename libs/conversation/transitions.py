@@ -186,7 +186,13 @@ def transition_for(state: Any, event: Any) -> TransitionDecision:
             else WorkflowState.EXECUTING
         )
     if isinstance(event, (SlotCapturedEvent, SlotCorrectedEvent)):
-        if state.workflow_state == WorkflowState.SELECTING_PROVIDER and event.slot in {
+        if isinstance(event, SlotCorrectedEvent) and event.slot in {
+            "care_setting",
+            "location",
+            "appointment_reason",
+        }:
+            target_state = WorkflowState.COLLECTING_CONTEXT
+        elif state.workflow_state == WorkflowState.SELECTING_PROVIDER and event.slot in {
             "provider_id",
             "provider_name",
         }:

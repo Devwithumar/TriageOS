@@ -7,6 +7,7 @@ from libs.conversation.domain import (
     OperationSucceededEvent,
     ProviderSearchResultData,
     SlotCapturedEvent,
+    TaskCancelledEvent,
     TaskName,
     WorkflowState,
 )
@@ -84,11 +85,17 @@ def build_response(result: OrchestrationResult) -> ResponseDecision:
             provider="guardrail",
             reason="urgent safety escalation",
         )
-    if state.workflow_state == WorkflowState.CANCELLED:
+    if any(isinstance(event, TaskCancelledEvent) for event in result.events):
         return ResponseDecision(
             text="Understood. I’ve stopped that request. What would you like help with instead?",
             provider="policy",
             reason="task cancelled",
+        )
+    if proposal and proposal.intent.value == "appointment_cancellation":
+        return ResponseDecision(
+            text="There isn’t an active request to cancel. What would you like help with?",
+            provider="policy",
+            reason="no active task to cancel",
         )
 
     operation_response = _operation_response(result)
@@ -104,6 +111,9 @@ def build_response(result: OrchestrationResult) -> ResponseDecision:
         return provider_selection
 
     if state.active_task != TaskName.NONE:
+        clarification = _workflow_clarification_response(result)
+        if clarification:
+            return clarification
         workflow_response = _workflow_response(state)
         if workflow_response:
             return workflow_response
@@ -247,6 +257,35 @@ def _workflow_response(state: ConversationState) -> ResponseDecision | None:
             reason="appointment request ready for confirmation",
         )
     return None
+
+
+def _workflow_clarification_response(result: OrchestrationResult) -> ResponseDecision | None:
+    state = result.session.state
+    normalized = " ".join(result.turn_event.text.lower().split())
+    asks_about_provider = any(
+        phrase in normalized
+        for phrase in (
+            "what clinic",
+            "which clinic",
+            "what provider",
+            "which provider",
+            "what hospital",
+            "which hospital",
+            "where are you booking",
+        )
+    )
+    if not asks_about_provider or "location" in state.slots:
+        return None
+    care_setting = state.slots.get("care_setting")
+    care_text = f" for {care_setting.value}" if care_setting else ""
+    return ResponseDecision(
+        text=(
+            f"We’re still gathering the appointment context{care_text}; I haven’t searched for a provider yet. "
+            "What city, neighborhood, or postal code should I use?"
+        ),
+        provider="workflow",
+        reason="clarified provider search prerequisites",
+    )
 
 
 def _general_response(proposal: ConversationProposal | None) -> ResponseDecision:

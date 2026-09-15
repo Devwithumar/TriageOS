@@ -481,6 +481,10 @@ def reduce_state(state: ConversationState, event: DomainEvent) -> ConversationSt
         if event.slot in {"care_setting", "location", "appointment_reason"}:
             next_state.provider_options = []
             next_state.last_operation_result = None
+            if isinstance(event, SlotCorrectedEvent):
+                next_state.slots.pop("provider_id", None)
+                next_state.slots.pop("provider_name", None)
+                next_state.workflow_state = WorkflowState.COLLECTING_CONTEXT
             if state.workflow_state == WorkflowState.SELECTING_PROVIDER:
                 next_state.workflow_state = WorkflowState.COLLECTING_CONTEXT
         if (
@@ -542,6 +546,9 @@ def reduce_state(state: ConversationState, event: DomainEvent) -> ConversationSt
     elif isinstance(event, TaskCancelledEvent):
         next_state.pending_operation = None
         next_state.active_task = TaskName.NONE
+        next_state.slots = {}
+        next_state.provider_options = []
+        next_state.last_operation_result = None
         next_state.workflow_state = WorkflowState.CANCELLED
     elif isinstance(event, OperationResultRejectedEvent):
         pass

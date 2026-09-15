@@ -7,6 +7,7 @@ import json
 import sys
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import httpx
 import websockets
@@ -38,6 +39,8 @@ from libs.conversation.domain import (
     ProviderResultRecord,
     RequestOperationCommand,
     SlotCapturedEvent,
+    SlotRecord,
+    SlotSource,
     StartOperationCommand,
     StartWorkflowCommand,
     StaleOperationResultError,
@@ -573,6 +576,116 @@ def test_canonical_conversation_engine(results: Results) -> None:
         results.ok("canonical conversation engine")
     except Exception as exc:
         results.fail("canonical conversation engine", str(exc))
+
+
+def test_reset_and_correction_boundaries(results: Results) -> None:
+    try:
+        captured_at = datetime.now(timezone.utc)
+        state = DomainConversationState(
+            session_id="reset-correction-boundary",
+            active_task=TaskName.APPOINTMENT_REQUEST,
+            workflow_state=WorkflowState.COLLECTING_DETAILS,
+            slots={
+                "care_setting": SlotRecord(
+                    value="hospital",
+                    source=SlotSource.USER_EXPLICIT,
+                    confidence=1,
+                    event_id="care",
+                    captured_at=captured_at,
+                ),
+                "location": SlotRecord(
+                    value="Garki, Abuja",
+                    source=SlotSource.USER_EXPLICIT,
+                    confidence=1,
+                    event_id="location",
+                    captured_at=captured_at,
+                ),
+                "provider_id": SlotRecord(
+                    value="provider:one",
+                    source=SlotSource.USER_EXPLICIT,
+                    confidence=1,
+                    event_id="provider-id",
+                    captured_at=captured_at,
+                ),
+                "provider_name": SlotRecord(
+                    value="First Hospital",
+                    source=SlotSource.USER_EXPLICIT,
+                    confidence=1,
+                    event_id="provider-name",
+                    captured_at=captured_at,
+                ),
+            },
+            provider_options=[
+                ProviderResultRecord(
+                    provider_id="provider:one",
+                    name="First Hospital",
+                    address="1 First Street",
+                    category="hospital",
+                ),
+                ProviderResultRecord(
+                    provider_id="provider:two",
+                    name="Second Hospital",
+                    address="2 Second Street",
+                    category="hospital",
+                ),
+            ],
+        )
+
+        provider_correction = build_recovery_proposal(
+            "Actually, option number 2 instead.", state, "provider-correction"
+        )
+        if {correction.name for correction in provider_correction.corrections} != {
+            "provider_id",
+            "provider_name",
+        }:
+            results.fail("reset and correction boundaries", "provider correction was not extracted")
+            return
+
+        working_state = state
+        validated = validate_proposal(working_state, provider_correction)
+        for command in validated.commands:
+            event = command_to_event(working_state, command)
+            working_state = reduce_state(working_state, event)
+        location_correction = build_recovery_proposal(
+            "Actually, I meant Ibadan instead.", working_state, "location-correction"
+        )
+        validated = validate_proposal(working_state, location_correction)
+        for command in validated.commands:
+            event = command_to_event(working_state, command)
+            working_state = reduce_state(working_state, event)
+        if (
+            working_state.slots.get("location").value != "Ibadan"
+            or working_state.provider_options
+            or "provider_id" in working_state.slots
+            or working_state.workflow_state != WorkflowState.COLLECTING_CONTEXT
+        ):
+            results.fail("reset and correction boundaries", "location correction retained stale provider context")
+            return
+
+        cancellation = ConversationProposal(
+            session_id=working_state.session_id,
+            based_on_state_version=working_state.state_version,
+            correlation_id="cancel-boundary",
+            intent=IntentName.APPOINTMENT_CANCELLATION,
+            dialogue_act=DialogueAct.CANCEL,
+            confidence_band=ProposalConfidenceBand.HIGH,
+            cancel_requested=True,
+        )
+        validated = validate_proposal(working_state, cancellation)
+        for command in validated.commands:
+            event = command_to_event(working_state, command)
+            working_state = reduce_state(working_state, event)
+        if (
+            working_state.active_task != TaskName.NONE
+            or working_state.workflow_state != WorkflowState.CANCELLED
+            or working_state.slots
+            or working_state.provider_options
+        ):
+            results.fail("reset and correction boundaries", "cancellation did not clear session context")
+            return
+        results.ok("reset and correction boundaries")
+    except Exception as exc:
+        results.fail("reset and correction boundaries", str(exc))
 
 
 def test_provider_lookup_boundary(results: Results) -> None:
@@ -1115,6 +1228,7 @@ async def main() -> int:
     test_structured_proposal_adapter(results)
     test_orchestration_pipeline(results)
     test_canonical_conversation_engine(results)
+    test_reset_and_correction_boundaries(results)
     test_provider_lookup_boundary(results)
     test_provider_option_matching(results)
     test_workflow_contracts(results)
