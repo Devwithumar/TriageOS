@@ -83,7 +83,12 @@ from services.conversation.app.agent import (
     generate_reply,
 )
 from services.conversation.app.canonical_engine import CanonicalConversationEngine
-from services.conversation.app.provider_directory import Provider, ProviderSearchResult
+from services.conversation.app.provider_directory import (
+    Provider,
+    ProviderDirectory,
+    ProviderDirectoryError,
+    ProviderSearchResult,
+)
 
 VOICE_URL = "http://localhost:8000"
 CONVERSATION_URL = "http://localhost:8001"
@@ -708,6 +713,121 @@ def test_provider_lookup_boundary(results: Results) -> None:
         results.fail("provider lookup boundary", str(exc))
 
 
+def test_provider_search_reliability(results: Results) -> None:
+    class RetryProposalSource:
+        def propose(self, user_text, state, recent_messages, correlation_id):
+            if "try again" in user_text.lower():
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.PROVIDER_LOOKUP,
+                    dialogue_act=DialogueAct.INFORM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                    tool_selection=ToolSelectionProposal(operation=OperationName.SEARCH_PROVIDERS),
+                )
+            else:
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.PROVIDER_LOOKUP,
+                    dialogue_act=DialogueAct.INFORM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                    requested_task=TaskName.PROVIDER_LOOKUP,
+                    slots=[
+                        ProposedSlot(name="care_setting", value="hospital", source="user_explicit", confidence=1),
+                        ProposedSlot(name="location", value="Lagos", source="user_explicit", confidence=1),
+                    ],
+                )
+            return ProposalCompletion(proposal=proposal, model="fake", provider="fake")
+
+    class FlakyProviderDirectory:
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, care_setting, location, reason=None):
+            self.calls += 1
+            if self.calls == 1:
+                return ProviderSearchResult(
+                    location=location,
+                    providers=[],
+                    error="temporary outage",
+                    error_code="unavailable",
+                )
+            return ProviderSearchResult(
+                location=location,
+                providers=[
+                    Provider(
+                        provider_id="retry:1",
+                        name="Verified Retry Hospital",
+                        address="1 Retry Street, Lagos",
+                        category=care_setting,
+                        latitude=0,
+                        longitude=0,
+                        distance_km=1,
+                    )
+                ],
+            )
+
+    class EmptyProviderDirectory:
+        def search(self, care_setting, location, reason=None):
+            return ProviderSearchResult(location=location, providers=[])
+
+    try:
+        flaky = FlakyProviderDirectory()
+        engine = CanonicalConversationEngine(RetryProposalSource(), flaky)
+        first = engine.handle_turn("provider-retry", "Find a hospital near Lagos")
+        second = engine.handle_turn("provider-retry", "try again")
+        if (
+            "try again" not in first.reply.lower()
+            or "verified retry hospital" not in second.reply.lower()
+            or flaky.calls != 2
+        ):
+            results.fail("provider search reliability", f"retry flow failed: first={first.reply} second={second.reply}")
+            return
+
+        empty = CanonicalConversationEngine(RetryProposalSource(), EmptyProviderDirectory())
+        no_match = empty.handle_turn("provider-no-match", "Find a hospital near Lagos")
+        if "couldn’t find a verified provider" not in no_match.reply.lower():
+            results.fail("provider search reliability", f"no-match response was misclassified: {no_match.reply}")
+            return
+
+        directory = ProviderDirectory()
+        directory._geocode = lambda location: (6.5, 3.4, location)
+        directory._search_openstreetmap = lambda *args: (_ for _ in ()).throw(
+            ProviderDirectoryError("temporary directory outage")
+        )
+        fallback_calls = 0
+
+        def fallback_search(**kwargs):
+            nonlocal fallback_calls
+            fallback_calls += 1
+            if fallback_calls == 1:
+                raise ProviderDirectoryError("temporary directory outage")
+            return [
+                Provider(
+                    provider_id="recovered:1",
+                    name="Recovered Hospital",
+                    address="Lagos",
+                    category="hospital",
+                    latitude=6.51,
+                    longitude=3.41,
+                    distance_km=1,
+                )
+            ]
+
+        directory._search_nominatim_providers = fallback_search
+        first = directory.search("hospital", "Lagos")
+        second = directory.search("hospital", "Lagos")
+        if first.error_code != "unavailable" or not second.providers or fallback_calls != 2:
+            results.fail("provider search reliability", "transient directory failure was cached")
+            return
+        results.ok("provider search reliability")
+    except Exception as exc:
+        results.fail("provider search reliability", str(exc))
+
+
 def test_provider_option_matching(results: Results) -> None:
     try:
         options = [
@@ -729,10 +849,75 @@ def test_provider_option_matching(results: Results) -> None:
             "I would like to use option number 2",
             "can you get me more details about cedarcrest abuja",
         )
-        if all(resolve_provider_reference(text, options) == options[1] for text in references):
-            results.ok("provider option matching")
-        else:
+        if not all(resolve_provider_reference(text, options) == options[1] for text in references):
             results.fail("provider option matching", "informal provider references did not resolve")
+            return
+
+        class OptionProposalSource:
+            def propose(self, user_text, state, recent_messages, correlation_id):
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.PROVIDER_LOOKUP if state.state_version == 0 else IntentName.GENERAL_CONVERSATION,
+                    dialogue_act=DialogueAct.INFORM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                    requested_task=TaskName.PROVIDER_LOOKUP if state.state_version == 0 else TaskName.NONE,
+                    slots=(
+                        [
+                            ProposedSlot(name="care_setting", value="hospital", source="user_explicit", confidence=1),
+                            ProposedSlot(name="location", value="Lagos", source="user_explicit", confidence=1),
+                        ]
+                        if state.state_version == 0
+                        else []
+                    ),
+                )
+                return ProposalCompletion(proposal=proposal, model="fake", provider="fake")
+
+        class OptionDirectory:
+            def search(self, care_setting, location, reason=None):
+                return ProviderSearchResult(
+                    location=location,
+                    providers=[
+                        Provider(
+                            provider_id="provider:1",
+                            name="Eye Foundation Hospital",
+                            address="648 Mobolaji Johnson Street, Lagos",
+                            category=care_setting,
+                            latitude=0,
+                            longitude=0,
+                            distance_km=1,
+                        ),
+                        Provider(
+                            provider_id="provider:2",
+                            name="CedarCrest Abuja Hospital",
+                            address="2 Ahmad Daku Street, Abuja",
+                            category=care_setting,
+                            latitude=0,
+                            longitude=0,
+                            distance_km=2,
+                            phone="+234 0809 515 7906",
+                        ),
+                    ],
+                )
+
+        engine = CanonicalConversationEngine(OptionProposalSource(), OptionDirectory())
+        engine.handle_turn("provider-semantics", "Find a hospital near Lagos")
+        details = engine.handle_turn(
+            "provider-semantics",
+            "The second one sounds good, but can you tell me a bit about it first?",
+        )
+        selected = engine.handle_turn("provider-semantics", "The second one sounds good")
+        phone = engine.handle_turn("provider-semantics", "Can you give me their phone number?")
+        if (
+            "verified directory details" not in details.reply.lower()
+            or details.state["structured_state"].get("provider_name")
+            or "selected cedarcrest abuja hospital" not in selected.reply.lower()
+            or "+234 0809 515 7906" not in phone.reply
+        ):
+            results.fail("provider option matching", "details and selection semantics were conflated")
+            return
+        results.ok("provider option matching")
     except Exception as exc:
         results.fail("provider option matching", str(exc))
 
@@ -1230,6 +1415,7 @@ async def main() -> int:
     test_canonical_conversation_engine(results)
     test_reset_and_correction_boundaries(results)
     test_provider_lookup_boundary(results)
+    test_provider_search_reliability(results)
     test_provider_option_matching(results)
     test_workflow_contracts(results)
     test_factual_routing_boundaries(results)

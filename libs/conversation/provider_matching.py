@@ -72,6 +72,21 @@ def is_provider_details_request(user_text: str) -> bool:
     )
 
 
+def is_provider_retry_request(user_text: str) -> bool:
+    normalized = " ".join(user_text.lower().split())
+    return any(
+        phrase in normalized
+        for phrase in (
+            "try again",
+            "search again",
+            "look again",
+            "check again",
+            "retry",
+            "run that again",
+        )
+    )
+
+
 def _ordinal_index(normalized: str) -> int | None:
     match = re.search(
         r"\b(?:option|choice|number|no\.?|the)?\s*"

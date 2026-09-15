@@ -34,10 +34,11 @@ from libs.conversation.orchestrator import (
 )
 from libs.conversation.persistence import InMemorySessionRepository
 from libs.conversation.proposals import ConversationProposal
-from libs.conversation.proposals import ProposalConfidenceBand, ProposedSlot
+from libs.conversation.proposals import ProposalConfidenceBand, ProposedSlot, ToolSelectionProposal
 from libs.conversation.contracts import DialogueAct, IntentName
 from libs.conversation.provider_matching import (
     is_provider_details_request,
+    is_provider_retry_request,
     resolve_provider_reference,
 )
 from services.conversation.app.provider_directory import ProviderDirectory
@@ -177,6 +178,7 @@ class CanonicalConversationEngine:
             ],
             source=directory_result.source,
             error=directory_result.error,
+            error_code=directory_result.error_code,
         )
         complete_command = CompleteOperationCommand(
             session_id=started_state.session_id,
@@ -334,6 +336,26 @@ class _PolicyAwareProposalSource:
                     model="policy",
                     provider="correction_policy",
                 )
+        if (
+            is_provider_retry_request(user_text)
+            and isinstance(state.last_operation_result, ProviderSearchResultData)
+            and state.last_operation_result.error
+            and state.active_task in {TaskName.APPOINTMENT_REQUEST, TaskName.PROVIDER_LOOKUP}
+            and state.pending_operation is None
+        ):
+            proposal = ConversationProposal(
+                session_id=state.session_id,
+                based_on_state_version=state.state_version,
+                correlation_id=correlation_id,
+                intent=IntentName.PROVIDER_LOOKUP,
+                dialogue_act=DialogueAct.INFORM,
+                confidence_band=ProposalConfidenceBand.HIGH,
+                tool_selection=ToolSelectionProposal(
+                    operation=OperationName.SEARCH_PROVIDERS,
+                    rationale="retry the previous verified provider search",
+                ),
+            )
+            return ProposalCompletion(proposal=proposal, model="policy", provider="retry_policy")
         if state.provider_options:
             provider = resolve_provider_reference(user_text, state.provider_options)
             if provider is not None:

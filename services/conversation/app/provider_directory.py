@@ -49,6 +49,7 @@ class ProviderSearchResult:
     providers: list[Provider]
     source: str = "OpenStreetMap"
     error: str | None = None
+    error_code: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -56,6 +57,7 @@ class ProviderSearchResult:
             "providers": [provider.as_dict() for provider in self.providers],
             "source": self.source,
             "error": self.error,
+            "error_code": self.error_code,
         }
 
 
@@ -89,6 +91,7 @@ class ProviderDirectory:
                 location=location,
                 providers=[],
                 error=f"provider directory provider '{self._provider}' is not enabled",
+                error_code="misconfigured",
             )
         profile_name, profile = self._resolve_profile(care_setting)
         cache_key = (profile_name, " ".join(location.lower().split()))
@@ -142,15 +145,22 @@ class ProviderDirectory:
                     if directory_error is not None and not providers
                     else None
                 ),
+                error_code=(
+                    _provider_error_code(directory_error)
+                    if directory_error is not None and not providers
+                    else None
+                ),
             )
         except (httpx.HTTPError, ValueError, KeyError, ProviderDirectoryError) as exc:
             result = ProviderSearchResult(
                 location=location,
                 providers=[],
                 error=str(exc),
+                error_code=_provider_error_code(exc),
             )
 
-        self._cache[cache_key] = (time.monotonic(), result)
+        if result.error is None:
+            self._cache[cache_key] = (time.monotonic(), result)
         return result
 
     def search_named_provider(self, provider_name: str, location: str) -> ProviderSearchResult:
@@ -201,10 +211,21 @@ class ProviderDirectory:
                     if directory_error is not None and not providers
                     else None
                 ),
+                error_code=(
+                    _provider_error_code(directory_error)
+                    if directory_error is not None and not providers
+                    else None
+                ),
             )
         except (httpx.HTTPError, ValueError, KeyError, ProviderDirectoryError) as exc:
-            result = ProviderSearchResult(location=location, providers=[], error=str(exc))
-        self._cache[cache_key] = (time.monotonic(), result)
+            result = ProviderSearchResult(
+                location=location,
+                providers=[],
+                error=str(exc),
+                error_code=_provider_error_code(exc),
+            )
+        if result.error is None:
+            self._cache[cache_key] = (time.monotonic(), result)
         return result
 
     def _geocode(self, location: str) -> tuple[float, float, str]:
@@ -548,3 +569,13 @@ def _nominatim_address(place: dict[str, Any]) -> str | None:
     )
     parts = [part for part in (street, locality) if part]
     return ", ".join(parts) if parts else None
+
+
+def _provider_error_code(error: Exception | None) -> str:
+    if isinstance(error, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(error, ProviderDirectoryError) and str(error).startswith("I could not locate"):
+        return "location_not_found"
+    if isinstance(error, (ValueError, KeyError)):
+        return "invalid_response"
+    return "unavailable"

@@ -110,6 +110,10 @@ def build_response(result: OrchestrationResult) -> ResponseDecision:
     if provider_selection:
         return provider_selection
 
+    provider_failure = _provider_failure_response(result)
+    if provider_failure:
+        return provider_failure
+
     if state.active_task != TaskName.NONE:
         clarification = _workflow_clarification_response(result)
         if clarification:
@@ -141,10 +145,34 @@ def _operation_response(result: OrchestrationResult) -> ResponseDecision | None:
                 reason="rendered verified provider search result",
             )
         if result.error:
+            if result.error_code == "location_not_found":
+                return ResponseDecision(
+                    text=(
+                        f"I couldn’t locate {result.location} in the directory. "
+                        "Could you check the city, neighborhood, or postal code?"
+                    ),
+                    provider="provider_directory",
+                    reason="provider directory location not found",
+                )
+            if result.error_code == "timeout":
+                return ResponseDecision(
+                    text=(
+                        "The verified provider directory timed out. You can say ‘try again’ "
+                        "or give me a different location."
+                    ),
+                    provider="provider_directory",
+                    reason="provider directory timed out",
+                )
+            if result.error_code == "misconfigured":
+                return ResponseDecision(
+                    text="The verified provider directory is not configured yet, so I can’t search it safely.",
+                    provider="provider_directory",
+                    reason="provider directory misconfigured",
+                )
             return ResponseDecision(
                 text=(
-                    "I couldn’t reach the provider directory right now, so I won’t invent a provider "
-                    "or address. Would you like to try another location?"
+                    "I couldn’t reach the verified provider directory right now, so I won’t invent a provider "
+                    "or address. You can say ‘try again’ or give me a different location."
                 ),
                 provider="provider_directory",
                 reason="provider directory failed",
@@ -166,6 +194,33 @@ def _operation_response(result: OrchestrationResult) -> ResponseDecision | None:
             reason="provider search pending",
         )
     return None
+
+
+def _provider_failure_response(result: OrchestrationResult) -> ResponseDecision | None:
+    state = result.session.state
+    operation_result = state.last_operation_result
+    if not isinstance(operation_result, ProviderSearchResultData) or not operation_result.error:
+        return None
+    if any(isinstance(event, OperationSucceededEvent) for event in result.events):
+        return None
+    if state.provider_options:
+        return None
+    if operation_result.error_code == "location_not_found":
+        text = (
+            f"I couldn’t locate {operation_result.location} in the verified directory. "
+            "Could you check the city, neighborhood, or postal code?"
+        )
+        reason = "provider directory location not found"
+    elif operation_result.error_code == "timeout":
+        text = "The verified provider directory timed out. You can say ‘try again’ or give me a different location."
+        reason = "provider directory timed out"
+    elif operation_result.error_code == "misconfigured":
+        text = "The verified provider directory is not configured yet, so I can’t search it safely."
+        reason = "provider directory misconfigured"
+    else:
+        text = "The verified provider directory is unavailable. You can say ‘try again’ or give me a different location."
+        reason = "provider directory failure remains active"
+    return ResponseDecision(text=text, provider="provider_directory", reason=reason)
 
 
 def _provider_details_response(result: OrchestrationResult) -> ResponseDecision | None:

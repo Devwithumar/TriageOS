@@ -136,6 +136,7 @@ class ProviderSearchResultData(BaseModel):
     providers: list[ProviderResultRecord] = Field(default_factory=list)
     source: str = Field(min_length=1)
     error: str | None = None
+    error_code: str | None = None
 
 
 class AppointmentRequestResultData(BaseModel):
