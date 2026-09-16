@@ -59,6 +59,15 @@ Then open:
 http://localhost:8000
 ```
 
+To run the smoke tests against non-default local ports, set the service URLs before starting the test runner:
+
+```powershell
+$env:TRIAGEOS_VOICE_URL = "http://localhost:8000"
+$env:TRIAGEOS_CONVERSATION_URL = "http://localhost:8001"
+$env:TRIAGEOS_WS_BASE = "ws://localhost:8000"
+python scripts/smoke_test.py
+```
+
 Firefox uses the MediaRecorder fallback. To turn recorded audio into text, set `STT_PROVIDER=deepgram` and add `DEEPGRAM_API_KEY` to `.env`. Chromium browsers continue using browser SpeechRecognition without this setting.
 
 ## Repository Layout

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -90,9 +91,9 @@ from services.conversation.app.provider_directory import (
     ProviderSearchResult,
 )
 
-VOICE_URL = "http://localhost:8000"
-CONVERSATION_URL = "http://localhost:8001"
-WS_BASE = "ws://localhost:8000"
+VOICE_URL = os.getenv("TRIAGEOS_VOICE_URL", "http://localhost:8000")
+CONVERSATION_URL = os.getenv("TRIAGEOS_CONVERSATION_URL", "http://localhost:8001")
+WS_BASE = os.getenv("TRIAGEOS_WS_BASE", "ws://localhost:8000")
 
 
 @dataclass
