@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from libs.conversation.domain import (
     ConversationState,
     OperationSucceededEvent,
+    PracticeProfileResultData,
     ProviderSearchResultData,
     SlotCapturedEvent,
     TaskCancelledEvent,
@@ -17,6 +18,7 @@ from libs.conversation.provider_matching import (
     is_provider_details_request,
     resolve_provider_reference,
 )
+from services.conversation.app.practice_profile import practice_profile_topic
 
 
 @dataclass(frozen=True)
@@ -129,6 +131,7 @@ def _operation_response(result: OrchestrationResult) -> ResponseDecision | None:
     state = result.session.state
     if not any(isinstance(event, OperationSucceededEvent) for event in result.events):
         return None
+    question = result.turn_event.text
     result = state.last_operation_result
     if isinstance(result, ProviderSearchResultData):
         if result.providers:
@@ -185,6 +188,21 @@ def _operation_response(result: OrchestrationResult) -> ResponseDecision | None:
             provider="provider_directory",
             reason="provider directory returned no matches",
         )
+    if isinstance(result, PracticeProfileResultData):
+        if result.error:
+            return ResponseDecision(
+                text=(
+                    "I don’t have a verified practice profile configured yet, so I can’t confirm "
+                    "the practice’s hours, location, services, contact details, or insurance policies."
+                ),
+                provider="practice_profile",
+                reason=f"practice profile unavailable: {result.error_code or 'unknown'}",
+            )
+        return ResponseDecision(
+            text=_format_practice_profile(result, question),
+            provider="practice_profile",
+            reason="rendered configured practice profile",
+        )
     if state.workflow_state == WorkflowState.SEARCHING_PROVIDERS:
         location = state.slots.get("location")
         location_text = f" near {location.value}" if location else ""
@@ -194,6 +212,56 @@ def _operation_response(result: OrchestrationResult) -> ResponseDecision | None:
             reason="provider search pending",
         )
     return None
+
+
+def _format_practice_profile(profile: PracticeProfileResultData, question: str) -> str:
+    topic = practice_profile_topic(question)
+    if topic == "hours":
+        if not profile.hours:
+            return "The configured practice profile does not include opening hours."
+        hours = "; ".join(
+            (
+                f"{entry.day}: closed"
+                if entry.closed
+                else f"{entry.day}: {entry.opens_at or 'hours unavailable'}–{entry.closes_at or 'hours unavailable'}"
+            )
+            for entry in profile.hours
+        )
+        return f"The configured hours for {profile.display_name} are: {hours}."
+    if topic == "location":
+        return (
+            f"{profile.display_name} is listed at {profile.address}."
+            if profile.address
+            else "The configured practice profile does not include an address."
+        )
+    if topic == "contact":
+        contact = ". ".join(
+            value
+            for value in (
+                f"Phone: {profile.phone}" if profile.phone else None,
+                f"Website: {profile.website}" if profile.website else None,
+            )
+            if value
+        )
+        return contact or "The configured practice profile does not include contact details."
+    if topic == "insurance":
+        return (
+            f"The configured accepted insurance list is: {', '.join(profile.accepted_insurance)}."
+            if profile.accepted_insurance
+            else "The configured practice profile does not include accepted insurance information."
+        )
+    if topic == "services":
+        return (
+            f"The configured services are: {', '.join(profile.services)}."
+            if profile.services
+            else "The configured practice profile does not include a services list."
+        )
+    details = [profile.display_name]
+    if profile.address:
+        details.append(f"Address: {profile.address}")
+    if profile.phone:
+        details.append(f"Phone: {profile.phone}")
+    return ". ".join(details) + "."
 
 
 def _provider_failure_response(result: OrchestrationResult) -> ResponseDecision | None:

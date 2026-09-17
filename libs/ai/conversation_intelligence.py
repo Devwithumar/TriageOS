@@ -78,6 +78,13 @@ PROVIDER_TERMS = (
 )
 
 LOCAL_LOOKUP_MARKERS = (
+    "find",
+    "need a",
+    "want a",
+    "search for",
+    "look for",
+    "looking for",
+    "locate",
     "nearby",
     " near ",
     "near me",
@@ -187,7 +194,10 @@ def detect_intent(text: str) -> ConversationIntent:
 
 
 def _is_capability_question(normalized: str) -> bool:
-    if any(phrase in normalized for phrase in ("who are you", "what are you", "what can you do", "how do you work")):
+    if any(
+        normalized == phrase or normalized.startswith(f"{phrase} ")
+        for phrase in ("who are you", "what are you", "what can you do", "how do you work")
+    ):
         return True
     if not any(term in normalized for term in CAPABILITY_ACTION_TERMS):
         return False

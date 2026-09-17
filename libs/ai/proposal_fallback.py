@@ -120,11 +120,20 @@ def _extract_provider_lookup_slots(user_text: str) -> list[ProposedSlot]:
     )
     care_setting = next((term for term in provider_terms if term in normalized), None)
     location_match = re.search(
-        r"\b(?:near|in|around|at|close to)\s+([^?.!]+)",
+        r"\b(?:i\s+(?:am|'m)|we\s+(?:are|'re)|live|located|based|stay)\s+"
+        r"(?:in|at|near)\s+(?P<location>[^?.!;]+?)"
+        r"(?=\s+(?:and|but)\s+(?:i|we|please|want|need|would|looking)\b|[?.!;]|$)",
         user_text,
         re.IGNORECASE,
     )
-    location = location_match.group(1).strip(" ,") if location_match else None
+    if location_match is None:
+        location_match = re.search(
+            r"\b(?:near|in|around|at|close to)\s+(?P<location>[^?.!;]+?)"
+            r"(?=\s+(?:and|but)\s+(?:i|we|please|want|need|would|looking)\b|[?.!;]|$)",
+            user_text,
+            re.IGNORECASE,
+        )
+    location = location_match.group("location").strip(" ,") if location_match else None
     if location and location.lower() in {"me", "here", "there"}:
         location = None
     slots: list[ProposedSlot] = []

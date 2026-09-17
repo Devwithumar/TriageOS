@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -90,6 +91,7 @@ from services.conversation.app.provider_directory import (
     ProviderDirectoryError,
     ProviderSearchResult,
 )
+from services.conversation.app.practice_profile import PracticeProfileLookup
 
 VOICE_URL = os.getenv("TRIAGEOS_VOICE_URL", "http://localhost:8000")
 CONVERSATION_URL = os.getenv("TRIAGEOS_CONVERSATION_URL", "http://localhost:8001")
@@ -584,6 +586,53 @@ def test_canonical_conversation_engine(results: Results) -> None:
         results.fail("canonical conversation engine", str(exc))
 
 
+def test_practice_profile_slice(results: Results) -> None:
+    profile_payload = {
+        "profile_id": "practice:test",
+        "profile_version": 3,
+        "display_name": "Configured Test Practice",
+        "address": "1 Test Street",
+        "phone": "+234 000 000 0000",
+        "website": "https://example.test",
+        "hours": [
+            {"day": "Monday", "opens_at": "08:00", "closes_at": "17:00"},
+            {"day": "Sunday", "closed": True},
+        ],
+        "services": ["primary care"],
+        "accepted_insurance": ["Example Health"],
+    }
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path = f"{directory}/practice_profile.json"
+            with open(profile_path, "w", encoding="utf-8") as profile_file:
+                json.dump(profile_payload, profile_file)
+            lookup = PracticeProfileLookup(profile_path)
+            loaded = lookup.lookup()
+            engine = CanonicalConversationEngine(practice_profile=lookup)
+
+            hours = engine.handle_turn("practice-profile-smoke", "What are your opening hours?")
+            missing = CanonicalConversationEngine().handle_turn(
+                "unconfigured-profile-smoke", "What services does the practice offer?"
+            )
+            if (
+                loaded.profile_id != "practice:test"
+                or loaded.profile_version != 3
+                or "Monday: 08:00" not in hours.reply
+                or "17:00" not in hours.reply
+                or "Sunday: closed" not in hours.reply
+                or "practice profile" not in missing.reply.lower()
+                or "services" not in missing.reply.lower()
+            ):
+                results.fail(
+                    "practice profile slice",
+                    f"unexpected loaded={loaded} hours={hours.reply!r} missing={missing.reply!r}",
+                )
+                return
+        results.ok("practice profile slice")
+    except Exception as exc:
+        results.fail("practice profile slice", str(exc))
+
+
 def test_reset_and_correction_boundaries(results: Results) -> None:
     try:
         captured_at = datetime.now(timezone.utc)
@@ -696,20 +745,27 @@ def test_reset_and_correction_boundaries(results: Results) -> None:
 
 def test_provider_lookup_boundary(results: Results) -> None:
     try:
-        proposal = build_recovery_proposal(
-            "Find a hospital near Abuja, Nigeria.",
-            DomainConversationState(session_id="provider-lookup-boundary"),
-            "provider-lookup-correlation",
+        cases = (
+            ("Find a hospital near Abuja, Nigeria.", "hospital", "Abuja, Nigeria"),
+            ("I'm in Greater London and I want to find a clinic.", "clinic", "Greater London"),
+            ("Could you look for a doctor in Toronto?", "doctor", "Toronto"),
+            ("I live around Nairobi and need a hospital.", "hospital", "Nairobi"),
         )
-        slots = {slot.name: slot.value for slot in proposal.slots}
-        if (
-            proposal.intent == IntentName.PROVIDER_LOOKUP
-            and proposal.requested_task == TaskName.PROVIDER_LOOKUP
-            and slots == {"care_setting": "hospital", "location": "Abuja, Nigeria"}
-        ):
-            results.ok("provider lookup boundary")
-        else:
-            results.fail("provider lookup boundary", f"unexpected proposal={proposal}")
+        for index, (text, expected_care, expected_location) in enumerate(cases):
+            proposal = build_recovery_proposal(
+                text,
+                DomainConversationState(session_id=f"provider-lookup-boundary-{index}"),
+                f"provider-lookup-correlation-{index}",
+            )
+            slots = {slot.name: slot.value for slot in proposal.slots}
+            if (
+                proposal.intent != IntentName.PROVIDER_LOOKUP
+                or proposal.requested_task != TaskName.PROVIDER_LOOKUP
+                or slots != {"care_setting": expected_care, "location": expected_location}
+            ):
+                results.fail("provider lookup boundary", f"unexpected proposal={proposal}")
+                return
+        results.ok("provider lookup boundary")
     except Exception as exc:
         results.fail("provider lookup boundary", str(exc))
 
@@ -860,16 +916,16 @@ def test_provider_option_matching(results: Results) -> None:
                     session_id=state.session_id,
                     based_on_state_version=state.state_version,
                     correlation_id=correlation_id,
-                    intent=IntentName.PROVIDER_LOOKUP if state.state_version == 0 else IntentName.GENERAL_CONVERSATION,
+                    intent=IntentName.PROVIDER_LOOKUP if state.turn_count == 1 else IntentName.GENERAL_CONVERSATION,
                     dialogue_act=DialogueAct.INFORM,
                     confidence_band=ProposalConfidenceBand.HIGH,
-                    requested_task=TaskName.PROVIDER_LOOKUP if state.state_version == 0 else TaskName.NONE,
+                    requested_task=TaskName.PROVIDER_LOOKUP if state.turn_count == 1 else TaskName.NONE,
                     slots=(
                         [
                             ProposedSlot(name="care_setting", value="hospital", source="user_explicit", confidence=1),
                             ProposedSlot(name="location", value="Lagos", source="user_explicit", confidence=1),
                         ]
-                        if state.state_version == 0
+                        if state.turn_count == 1
                         else []
                     ),
                 )
@@ -1414,6 +1470,7 @@ async def main() -> int:
     test_structured_proposal_adapter(results)
     test_orchestration_pipeline(results)
     test_canonical_conversation_engine(results)
+    test_practice_profile_slice(results)
     test_reset_and_correction_boundaries(results)
     test_provider_lookup_boundary(results)
     test_provider_search_reliability(results)

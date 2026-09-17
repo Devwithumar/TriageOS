@@ -217,7 +217,11 @@ def validate_proposal(
     if proposal.requested_task != TaskName.NONE:
         if state.active_task != TaskName.NONE and proposal.requested_task != state.active_task:
             raise ProposalValidationError("cannot start a second task while one is active")
-        if proposal.requested_task not in {TaskName.APPOINTMENT_REQUEST, TaskName.PROVIDER_LOOKUP}:
+        if proposal.requested_task not in {
+            TaskName.APPOINTMENT_REQUEST,
+            TaskName.PROVIDER_LOOKUP,
+            TaskName.PRACTICE_INFORMATION,
+        }:
             raise ProposalValidationError("requested task is not enabled")
         if state.active_task == TaskName.NONE:
             command = StartWorkflowCommand(
@@ -311,6 +315,9 @@ def _validate_tool_selection(state: ConversationState, selection: ToolSelectionP
             WorkflowState.AWAITING_CONFIRMATION,
         }:
             raise ProposalValidationError("appointment request requires a reviewed request")
+    elif selection.operation == OperationName.GET_PRACTICE_PROFILE:
+        if state.active_task != TaskName.PRACTICE_INFORMATION:
+            raise ProposalValidationError("practice profile lookup requires a practice information task")
 
 
 def _cancel_command(state: ConversationState, proposal: ConversationProposal) -> CancelTaskCommand:

@@ -69,8 +69,14 @@ class CreateAppointmentRequestInput(BaseModel):
     callback_number: str = Field(min_length=1)
 
 
+class GetPracticeProfileInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: Literal[OperationName.GET_PRACTICE_PROFILE] = OperationName.GET_PRACTICE_PROFILE
+
+
 ToolInput = Annotated[
-    Union[SearchProvidersInput, CreateAppointmentRequestInput],
+    Union[SearchProvidersInput, CreateAppointmentRequestInput, GetPracticeProfileInput],
     Field(discriminator="tool_name"),
 ]
 
@@ -101,8 +107,32 @@ class AppointmentRequestOutput(BaseModel):
     status: Literal["submitted", "queued"]
 
 
+class PracticeHoursOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    day: str = Field(min_length=1)
+    opens_at: str | None = None
+    closes_at: str | None = None
+    closed: bool = False
+
+
+class PracticeProfileOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: Literal[OperationName.GET_PRACTICE_PROFILE] = OperationName.GET_PRACTICE_PROFILE
+    profile_id: str = Field(min_length=1)
+    profile_version: int = Field(ge=1)
+    display_name: str = Field(min_length=1)
+    address: str | None = None
+    phone: str | None = None
+    website: str | None = None
+    hours: list[PracticeHoursOutput] = Field(default_factory=list)
+    services: list[str] = Field(default_factory=list)
+    accepted_insurance: list[str] = Field(default_factory=list)
+
+
 ToolOutput = Annotated[
-    Union[ProviderSearchOutput, AppointmentRequestOutput],
+    Union[ProviderSearchOutput, AppointmentRequestOutput, PracticeProfileOutput],
     Field(discriminator="tool_name"),
 ]
 

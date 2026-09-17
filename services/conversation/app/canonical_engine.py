@@ -17,6 +17,7 @@ from libs.conversation.domain import (
     ConversationState,
     OperationName,
     OperationRequestedEvent,
+    PracticeProfileResultData,
     ProviderResultRecord,
     ProviderSearchResultData,
     RequestOperationCommand,
@@ -42,6 +43,7 @@ from libs.conversation.provider_matching import (
     resolve_provider_reference,
 )
 from services.conversation.app.provider_directory import ProviderDirectory
+from services.conversation.app.practice_profile import PracticeProfileLookup
 from services.conversation.app.response_policy import ResponseDecision, build_response
 
 
@@ -59,9 +61,11 @@ class CanonicalConversationEngine:
         self,
         adapter: ProposalSource | None = None,
         provider_directory: ProviderDirectory | None = None,
+        practice_profile: PracticeProfileLookup | None = None,
     ) -> None:
         self.repository = InMemorySessionRepository()
         self.provider_directory = provider_directory or ProviderDirectory()
+        self.practice_profile = practice_profile or PracticeProfileLookup()
         adapter = adapter or ProposalAdapter(load_llm_config())
         self.orchestrator = ConversationOrchestrator(
             self.repository,
@@ -86,6 +90,7 @@ class CanonicalConversationEngine:
         if not result.error:
             result = self._ensure_provider_operation(result)
             result = self._execute_provider_operation(result)
+            result = self._execute_practice_profile_operation(result)
         decision = build_response(result)
         self._messages.setdefault(session_id, []).extend(
             [
@@ -187,6 +192,40 @@ class CanonicalConversationEngine:
             request_id=operation.request_id,
             requested_state_version=operation.requested_state_version,
             result=output,
+        )
+        completed_event = command_to_event(started_state, complete_command)
+        committed = self.repository.commit_batch(
+            state.session_id,
+            state.state_version,
+            [started_event, completed_event],
+        )
+        return replace(
+            result,
+            session=committed.session,
+            events=result.events + (started_event, completed_event),
+        )
+
+    def _execute_practice_profile_operation(self, result: OrchestrationResult) -> OrchestrationResult:
+        state = result.session.state
+        operation = state.pending_operation
+        if operation is None or operation.operation != OperationName.GET_PRACTICE_PROFILE:
+            return result
+        start_command = StartOperationCommand(
+            session_id=state.session_id,
+            expected_state_version=state.state_version,
+            correlation_id=operation.correlation_id,
+            request_id=operation.request_id,
+        )
+        started_event = command_to_event(state, start_command)
+        started_state = reduce_state(state, started_event)
+        profile_result = self.practice_profile.lookup()
+        complete_command = CompleteOperationCommand(
+            session_id=started_state.session_id,
+            expected_state_version=started_state.state_version,
+            correlation_id=operation.correlation_id,
+            request_id=operation.request_id,
+            requested_state_version=operation.requested_state_version,
+            result=profile_result,
         )
         completed_event = command_to_event(started_state, complete_command)
         committed = self.repository.commit_batch(
@@ -317,6 +356,21 @@ class _PolicyAwareProposalSource:
                 confidence_band="high",
             )
             return ProposalCompletion(proposal=proposal, model="policy", provider="guardrail")
+        if detected.name == "practice_information" and not state.provider_options:
+            proposal = ConversationProposal(
+                session_id=state.session_id,
+                based_on_state_version=state.state_version,
+                correlation_id=correlation_id,
+                intent=IntentName.PRACTICE_INFORMATION,
+                dialogue_act=DialogueAct.REQUEST_INFORMATION,
+                confidence_band=ProposalConfidenceBand.HIGH,
+                requested_task=TaskName.PRACTICE_INFORMATION,
+                tool_selection=ToolSelectionProposal(
+                    operation=OperationName.GET_PRACTICE_PROFILE,
+                    rationale="answer only from the configured practice profile",
+                ),
+            )
+            return ProposalCompletion(proposal=proposal, model="policy", provider="practice_profile_policy")
         if detected.name == "appointment_cancellation":
             proposal = ConversationProposal(
                 session_id=state.session_id,

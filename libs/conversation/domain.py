@@ -28,6 +28,7 @@ class TaskName(StrEnum):
     NONE = "none"
     APPOINTMENT_REQUEST = "appointment_request"
     PROVIDER_LOOKUP = "provider_lookup"
+    PRACTICE_INFORMATION = "practice_information"
 
 
 class WorkflowState(StrEnum):
@@ -60,6 +61,7 @@ class SlotSource(StrEnum):
 class OperationName(StrEnum):
     SEARCH_PROVIDERS = "search_providers"
     CREATE_APPOINTMENT_REQUEST = "create_appointment_request"
+    GET_PRACTICE_PROFILE = "get_practice_profile"
 
 
 class OperationStatus(StrEnum):
@@ -148,8 +150,35 @@ class AppointmentRequestResultData(BaseModel):
     error: str | None = None
 
 
+class PracticeHoursRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    day: str = Field(min_length=1)
+    opens_at: str | None = None
+    closes_at: str | None = None
+    closed: bool = False
+
+
+class PracticeProfileResultData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    result_type: Literal["practice_profile"] = "practice_profile"
+    profile_id: str = Field(min_length=1)
+    profile_version: int = Field(ge=1)
+    display_name: str
+    address: str | None = None
+    phone: str | None = None
+    website: str | None = None
+    hours: list[PracticeHoursRecord] = Field(default_factory=list)
+    services: list[str] = Field(default_factory=list)
+    accepted_insurance: list[str] = Field(default_factory=list)
+    source: str = Field(min_length=1)
+    error: str | None = None
+    error_code: str | None = None
+
+
 OperationResultData = Annotated[
-    Union[ProviderSearchResultData, AppointmentRequestResultData],
+    Union[ProviderSearchResultData, AppointmentRequestResultData, PracticeProfileResultData],
     Field(discriminator="result_type"),
 ]
 
@@ -539,6 +568,8 @@ def reduce_state(state: ConversationState, event: DomainEvent) -> ConversationSt
                 if operation.operation == OperationName.SEARCH_PROVIDERS
                 else WorkflowState.COMPLETED
             )
+            if operation.operation == OperationName.GET_PRACTICE_PROFILE:
+                next_state.active_task = TaskName.NONE
         elif isinstance(event, OperationSupersededEvent):
             next_state.workflow_state = WorkflowState.COLLECTING_CONTEXT
         else:
