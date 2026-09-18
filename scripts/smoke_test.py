@@ -31,6 +31,8 @@ from libs.conversation.contracts import (
 )
 from libs.conversation.domain import (
     CaptureSlotCommand,
+    AvailabilityResultData,
+    AvailabilitySlotRecord,
     ConversationSession,
     ConversationState as DomainConversationState,
     DomainInvariantError,
@@ -92,6 +94,7 @@ from services.conversation.app.provider_directory import (
     ProviderSearchResult,
 )
 from services.conversation.app.practice_profile import PracticeProfileLookup
+from services.conversation.app.scheduling import MockSchedulingService
 
 VOICE_URL = os.getenv("TRIAGEOS_VOICE_URL", "http://localhost:8000")
 CONVERSATION_URL = os.getenv("TRIAGEOS_CONVERSATION_URL", "http://localhost:8001")
@@ -633,6 +636,150 @@ def test_practice_profile_slice(results: Results) -> None:
         results.fail("practice profile slice", str(exc))
 
 
+def test_mock_scheduling_slice(results: Results) -> None:
+    class SchedulingProposalSource:
+        def propose(self, user_text, state, recent_messages, correlation_id):
+            normalized = user_text.lower()
+            slots = []
+            if state.turn_count == 1:
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.APPOINTMENT_REQUEST,
+                    dialogue_act=DialogueAct.INFORM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                    requested_task=TaskName.APPOINTMENT_REQUEST,
+                    slots=[
+                        ProposedSlot(name="care_setting", value="hospital", source="user_explicit", confidence=1),
+                        ProposedSlot(name="location", value="Lagos", source="user_explicit", confidence=1),
+                        ProposedSlot(name="appointment_reason", value="general consultation", source="user_explicit", confidence=1),
+                    ],
+                )
+            elif "option 2" in normalized and isinstance(state.last_operation_result, AvailabilityResultData):
+                slots = [
+                    ProposedSlot(
+                        name="preferred_time",
+                        value=state.last_operation_result.slots[1].start_at,
+                        source="user_explicit",
+                        confidence=1,
+                    )
+                ]
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.GENERAL_CONVERSATION,
+                    dialogue_act=DialogueAct.INFORM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                    slots=slots,
+                )
+            elif "my name is" in normalized:
+                slots = [ProposedSlot(name="caller_name", value="Alex Morgan", source="user_explicit", confidence=1)]
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.GENERAL_CONVERSATION,
+                    dialogue_act=DialogueAct.INFORM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                    slots=slots,
+                )
+            elif "+44" in normalized:
+                slots = [ProposedSlot(name="callback_number", value="+44 20 1234 5678", source="user_explicit", confidence=1)]
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.GENERAL_CONVERSATION,
+                    dialogue_act=DialogueAct.INFORM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                    slots=slots,
+                )
+            else:
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.CONFIRMATION,
+                    dialogue_act=DialogueAct.CONFIRM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                )
+            return ProposalCompletion(proposal=proposal, model="fake", provider="fake")
+
+    class SchedulingProviderDirectory:
+        def search(self, care_setting, location, reason=None):
+            return ProviderSearchResult(
+                location=location,
+                providers=[
+                    Provider(
+                        provider_id="provider:scheduling",
+                        name="Verified Scheduling Clinic",
+                        address="1 Scheduling Street, Lagos",
+                        category=care_setting,
+                        latitude=0,
+                        longitude=0,
+                        distance_km=1,
+                    )
+                ],
+            )
+
+    try:
+        slots = [
+            AvailabilitySlotRecord(
+                slot_id="configured-1",
+                start_at="2026-10-01T09:00:00+01:00",
+                end_at="2026-10-01T09:30:00+01:00",
+                label="Thursday at 9:00 AM",
+            ),
+            AvailabilitySlotRecord(
+                slot_id="configured-2",
+                start_at="2026-10-01T14:00:00+01:00",
+                end_at="2026-10-01T14:30:00+01:00",
+                label="Thursday at 2:00 PM",
+            ),
+        ]
+        scheduler = MockSchedulingService(slots)
+        engine = CanonicalConversationEngine(
+            SchedulingProposalSource(),
+            SchedulingProviderDirectory(),
+            scheduling_service=scheduler,
+        )
+        session_id = "mock-scheduling-smoke"
+        started = engine.handle_turn(session_id, "I want to book a hospital appointment in Lagos for a consultation")
+        availability = engine.handle_turn(session_id, "option 1")
+        preferred = engine.handle_turn(session_id, "option 2")
+        named = engine.handle_turn(session_id, "My name is Alex Morgan")
+        phone = engine.handle_turn(session_id, "+44 20 1234 5678")
+        submitted = engine.handle_turn(session_id, "Yes, submit it")
+        duplicate = scheduler.submit_request(
+            idempotency_key="mock-scheduling-idempotency",
+            preferred_time=slots[0].start_at,
+        )
+        duplicate_again = scheduler.submit_request(
+            idempotency_key="mock-scheduling-idempotency",
+            preferred_time=slots[0].start_at,
+        )
+        if (
+            "verified scheduling clinic" not in started.reply.lower()
+            or "demonstration slots" not in availability.reply.lower()
+            or "name should" not in preferred.reply.lower()
+            or "phone number" not in named.reply.lower()
+            or "submit this request" not in phone.reply.lower()
+            or "mock scheduler" not in submitted.reply.lower()
+            or duplicate.request_reference != duplicate_again.request_reference
+            or submitted.state["structured_state"].get("appointment_status") != "completed"
+        ):
+            results.fail(
+                "mock scheduling slice",
+                f"unexpected replies={[started.reply, availability.reply, preferred.reply, named.reply, phone.reply, submitted.reply]}",
+            )
+            return
+        results.ok("mock scheduling slice")
+    except Exception as exc:
+        results.fail("mock scheduling slice", str(exc))
+
+
 def test_reset_and_correction_boundaries(results: Results) -> None:
     try:
         captured_at = datetime.now(timezone.utc)
@@ -850,8 +997,52 @@ def test_provider_search_reliability(results: Results) -> None:
             results.fail("provider search reliability", f"no-match response was misclassified: {no_match.reply}")
             return
 
+        class ResumeConversationSource:
+            def propose(self, user_text, state, recent_messages, correlation_id):
+                if "find" in user_text.lower():
+                    proposal = ConversationProposal(
+                        session_id=state.session_id,
+                        based_on_state_version=state.state_version,
+                        correlation_id=correlation_id,
+                        intent=IntentName.PROVIDER_LOOKUP,
+                        dialogue_act=DialogueAct.INFORM,
+                        confidence_band=ProposalConfidenceBand.HIGH,
+                        requested_task=TaskName.PROVIDER_LOOKUP,
+                        slots=[
+                            ProposedSlot(name="care_setting", value="hospital", source="user_explicit", confidence=1),
+                            ProposedSlot(name="location", value="Lagos", source="user_explicit", confidence=1),
+                        ],
+                    )
+                else:
+                    proposal = ConversationProposal(
+                        session_id=state.session_id,
+                        based_on_state_version=state.state_version,
+                        correlation_id=correlation_id,
+                        intent=IntentName.GENERAL_CONVERSATION,
+                        dialogue_act=DialogueAct.INFORM,
+                        confidence_band=ProposalConfidenceBand.HIGH,
+                        response_draft="Of course. What would you like to talk about?",
+                    )
+                return ProposalCompletion(proposal=proposal, model="fake", provider="fake")
+
+        class AlwaysFailProviderDirectory:
+            def search(self, care_setting, location, reason=None):
+                return ProviderSearchResult(
+                    location=location,
+                    providers=[],
+                    error="persistent outage",
+                    error_code="unavailable",
+                )
+
+        resumed_engine = CanonicalConversationEngine(ResumeConversationSource(), AlwaysFailProviderDirectory())
+        resumed_engine.handle_turn("provider-resume", "Find a hospital near Lagos")
+        resumed = resumed_engine.handle_turn("provider-resume", "hello, I have another question")
+        if resumed.reply != "Of course. What would you like to talk about?":
+            results.fail("provider search reliability", f"ordinary conversation was trapped: {resumed.reply}")
+            return
+
         directory = ProviderDirectory()
-        directory._geocode = lambda location: (6.5, 3.4, location)
+        directory._geocode = lambda location, deadline=None: (6.5, 3.4, location)
         directory._search_openstreetmap = lambda *args: (_ for _ in ()).throw(
             ProviderDirectoryError("temporary directory outage")
         )
@@ -880,7 +1071,78 @@ def test_provider_search_reliability(results: Results) -> None:
         if first.error_code != "unavailable" or not second.providers or fallback_calls != 2:
             results.fail("provider search reliability", "transient directory failure was cached")
             return
+
+        class FakeClient:
+            def __init__(self, request_fn):
+                self.request_fn = request_fn
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def request(self, method, url, params=None, data=None):
+                return self.request_fn(method, url, params, data)
+
+        retry_directory = ProviderDirectory()
+        retry_directory._max_attempts = 2
+        retry_directory._retry_backoff_seconds = 0
+        retry_attempts = 0
+
+        def retry_request(method, url, params, data):
+            nonlocal retry_attempts
+            retry_attempts += 1
+            if retry_attempts == 1:
+                raise httpx.ConnectError("temporary network failure", request=httpx.Request(method, url))
+            return httpx.Response(
+                200,
+                json={"elements": []},
+                request=httpx.Request(method, url),
+            )
+
+        retry_directory._http_client_factory = lambda **kwargs: FakeClient(retry_request)
+        payload = retry_directory._request_json(
+            "POST",
+            "https://directory.test/search",
+            headers={},
+            data={"data": "query"},
+            timeout_seconds=1,
+            deadline=None,
+        )
+        if retry_attempts != 2 or payload != {"elements": []}:
+            results.fail("provider transport resilience", "transient failure did not recover")
+            return
+
+        circuit_directory = ProviderDirectory()
+        circuit_directory._max_attempts = 1
+        circuit_directory._circuit_failure_threshold = 1
+        circuit_calls = 0
+
+        def failing_request(method, url, params, data):
+            nonlocal circuit_calls
+            circuit_calls += 1
+            raise httpx.ConnectError("persistent network failure", request=httpx.Request(method, url))
+
+        circuit_directory._http_client_factory = lambda **kwargs: FakeClient(failing_request)
+        for _ in range(2):
+            try:
+                circuit_directory._request_json(
+                    "GET",
+                    "https://circuit.test/search",
+                    headers={},
+                    timeout_seconds=1,
+                    deadline=None,
+                )
+            except ProviderDirectoryError:
+                pass
+        circuit_health = circuit_directory.health()
+        circuit_status = circuit_health["endpoints"]["circuit.test"]["status"]
+        if circuit_calls != 1 or circuit_status != "open":
+            results.fail("provider transport resilience", "circuit breaker did not stop repeated failures")
+            return
         results.ok("provider search reliability")
+        results.ok("provider transport resilience")
     except Exception as exc:
         results.fail("provider search reliability", str(exc))
 
@@ -1471,6 +1733,7 @@ async def main() -> int:
     test_orchestration_pipeline(results)
     test_canonical_conversation_engine(results)
     test_practice_profile_slice(results)
+    test_mock_scheduling_slice(results)
     test_reset_and_correction_boundaries(results)
     test_provider_lookup_boundary(results)
     test_provider_search_reliability(results)

@@ -60,6 +60,7 @@ class SlotSource(StrEnum):
 
 class OperationName(StrEnum):
     SEARCH_PROVIDERS = "search_providers"
+    GET_AVAILABILITY = "get_availability"
     CREATE_APPOINTMENT_REQUEST = "create_appointment_request"
     GET_PRACTICE_PROFILE = "get_practice_profile"
 
@@ -150,6 +151,26 @@ class AppointmentRequestResultData(BaseModel):
     error: str | None = None
 
 
+class AvailabilitySlotRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slot_id: str = Field(min_length=1)
+    start_at: str = Field(min_length=1)
+    end_at: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+
+
+class AvailabilityResultData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    result_type: Literal["availability"] = "availability"
+    provider_id: str = Field(min_length=1)
+    slots: list[AvailabilitySlotRecord] = Field(default_factory=list)
+    source: str = Field(min_length=1)
+    error: str | None = None
+    error_code: str | None = None
+
+
 class PracticeHoursRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -178,7 +199,12 @@ class PracticeProfileResultData(BaseModel):
 
 
 OperationResultData = Annotated[
-    Union[ProviderSearchResultData, AppointmentRequestResultData, PracticeProfileResultData],
+    Union[
+        ProviderSearchResultData,
+        AvailabilityResultData,
+        AppointmentRequestResultData,
+        PracticeProfileResultData,
+    ],
     Field(discriminator="result_type"),
 ]
 
@@ -522,6 +548,22 @@ def reduce_state(state: ConversationState, event: DomainEvent) -> ConversationSt
             and event.slot in {"provider_id", "provider_name"}
         ):
             next_state.workflow_state = WorkflowState.COLLECTING_DETAILS
+        if (
+            next_state.active_task == TaskName.APPOINTMENT_REQUEST
+            and "provider_id" in next_state.slots
+            and all(
+                slot_name in next_state.slots
+                for slot_name in {
+                    "care_setting",
+                    "location",
+                    "appointment_reason",
+                    "preferred_time",
+                    "caller_name",
+                    "callback_number",
+                }
+            )
+        ):
+            next_state.workflow_state = WorkflowState.REVIEWING_REQUEST
     elif isinstance(event, OperationRequestedEvent):
         if next_state.pending_operation is not None:
             raise DomainInvariantError("cannot request an operation while one is pending")
@@ -563,11 +605,21 @@ def reduce_state(state: ConversationState, event: DomainEvent) -> ConversationSt
             next_state.last_operation_result = event.result
             if isinstance(event.result, ProviderSearchResultData):
                 next_state.provider_options = event.result.providers
-            next_state.workflow_state = (
-                WorkflowState.SELECTING_PROVIDER
-                if operation.operation == OperationName.SEARCH_PROVIDERS
-                else WorkflowState.COMPLETED
-            )
+            if (
+                isinstance(event.result, AppointmentRequestResultData)
+                and event.result.status == "failed"
+            ):
+                next_state.workflow_state = WorkflowState.FAILED
+            else:
+                next_state.workflow_state = (
+                    WorkflowState.SELECTING_PROVIDER
+                    if operation.operation == OperationName.SEARCH_PROVIDERS
+                    else (
+                        WorkflowState.COLLECTING_DETAILS
+                        if operation.operation == OperationName.GET_AVAILABILITY
+                        else WorkflowState.COMPLETED
+                    )
+                )
             if operation.operation == OperationName.GET_PRACTICE_PROFILE:
                 next_state.active_task = TaskName.NONE
         elif isinstance(event, OperationSupersededEvent):

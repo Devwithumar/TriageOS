@@ -2,8 +2,12 @@
 
 from dataclasses import dataclass
 
+from libs.conversation.contracts import IntentName
 from libs.conversation.domain import (
     ConversationState,
+    AppointmentRequestResultData,
+    AvailabilityResultData,
+    OperationName,
     OperationSucceededEvent,
     PracticeProfileResultData,
     ProviderSearchResultData,
@@ -49,6 +53,16 @@ _TASK_SLOTS = {
         "caller_name",
         "callback_number",
     ),
+}
+
+_WORKFLOW_INTENTS = {
+    IntentName.PROVIDER_LOOKUP,
+    IntentName.APPOINTMENT_REQUEST,
+    IntentName.APPOINTMENT_CHANGE,
+    IntentName.APPOINTMENT_CANCELLATION,
+    IntentName.CONFIRMATION,
+    IntentName.CORRECTION,
+    IntentName.PRACTICE_INFORMATION,
 }
 
 _UNSAFE_DRAFT_TERMS = (
@@ -115,6 +129,13 @@ def build_response(result: OrchestrationResult) -> ResponseDecision:
     provider_failure = _provider_failure_response(result)
     if provider_failure:
         return provider_failure
+
+    if (
+        state.active_task != TaskName.NONE
+        and proposal is not None
+        and proposal.intent not in _WORKFLOW_INTENTS
+    ):
+        return _general_response(proposal)
 
     if state.active_task != TaskName.NONE:
         clarification = _workflow_clarification_response(result)
@@ -203,6 +224,43 @@ def _operation_response(result: OrchestrationResult) -> ResponseDecision | None:
             provider="practice_profile",
             reason="rendered configured practice profile",
         )
+    if isinstance(result, AvailabilityResultData):
+        if result.error:
+            return ResponseDecision(
+                text="I couldn’t retrieve availability from the mock scheduler. No appointment request was submitted.",
+                provider="mock_scheduling",
+                reason="mock availability lookup failed",
+            )
+        if not result.slots:
+            return ResponseDecision(
+                text="The selected provider has no available mock slots. No appointment request was submitted.",
+                provider="mock_scheduling",
+                reason="mock scheduler returned no slots",
+            )
+        options = "; ".join(
+            f"{index}. {slot.label}"
+            for index, slot in enumerate(result.slots, start=1)
+        )
+        return ResponseDecision(
+            text=f"These are the available demonstration slots: {options}. Which one would you prefer?",
+            provider="mock_scheduling",
+            reason="rendered mock availability",
+        )
+    if isinstance(result, AppointmentRequestResultData):
+        if result.status == "submitted":
+            return ResponseDecision(
+                text=(
+                    f"Your appointment request was submitted to the mock scheduler. Reference: {result.request_reference}. "
+                    "This is a demonstration only; no real appointment was booked."
+                ),
+                provider="mock_scheduling",
+                reason="mock appointment request submitted",
+            )
+        return ResponseDecision(
+            text="The appointment request could not be submitted, so no appointment was booked.",
+            provider="mock_scheduling",
+            reason="mock appointment request failed",
+        )
     if state.workflow_state == WorkflowState.SEARCHING_PROVIDERS:
         location = state.slots.get("location")
         location_text = f" near {location.value}" if location else ""
@@ -268,6 +326,12 @@ def _provider_failure_response(result: OrchestrationResult) -> ResponseDecision 
     state = result.session.state
     operation_result = state.last_operation_result
     if not isinstance(operation_result, ProviderSearchResultData) or not operation_result.error:
+        return None
+    if (
+        result.proposal is None
+        or result.proposal.tool_selection is None
+        or result.proposal.tool_selection.operation != OperationName.SEARCH_PROVIDERS
+    ):
         return None
     if any(isinstance(event, OperationSucceededEvent) for event in result.events):
         return None

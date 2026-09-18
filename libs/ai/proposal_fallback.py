@@ -4,7 +4,13 @@ import re
 
 from libs.ai.conversation_intelligence import detect_intent
 from libs.conversation.contracts import DialogueAct, IntentName
-from libs.conversation.domain import ConversationState, SlotSource, TaskName, WorkflowState
+from libs.conversation.domain import (
+    AvailabilityResultData,
+    ConversationState,
+    SlotSource,
+    TaskName,
+    WorkflowState,
+)
 from libs.conversation.provider_matching import resolve_provider_reference
 from libs.conversation.proposals import (
     ConversationProposal,
@@ -91,7 +97,11 @@ def _extract_explicit_slots(
     expected = _next_missing_slot(state, task)
     if expected is None:
         return []
-    value = _extract_value(user_text, expected)
+    value = (
+        _resolve_availability_slot(user_text, state.last_operation_result)
+        if expected == "preferred_time"
+        else _extract_value(user_text, expected)
+    )
     if not value:
         return []
     return [
@@ -102,6 +112,27 @@ def _extract_explicit_slots(
             confidence=0.9,
         )
     ]
+
+
+def _resolve_availability_slot(
+    user_text: str,
+    result: object,
+) -> str | None:
+    if not isinstance(result, AvailabilityResultData) or not result.slots:
+        return _extract_value(user_text, "preferred_time")
+    normalized = " ".join(user_text.lower().split())
+    ordinal = re.search(
+        r"\b(?:option|choice|number|no\.?)\s*(1|2|3|4|5)\b",
+        normalized,
+    )
+    if ordinal:
+        index = int(ordinal.group(1)) - 1
+        if index < len(result.slots):
+            return result.slots[index].start_at
+    for slot in result.slots:
+        if slot.label.lower() in normalized or slot.start_at.lower() in normalized:
+            return slot.start_at
+    return _extract_value(user_text, "preferred_time")
 
 
 def _extract_provider_lookup_slots(user_text: str) -> list[ProposedSlot]:

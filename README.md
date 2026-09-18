@@ -70,6 +70,8 @@ python scripts/smoke_test.py
 
 Firefox uses the MediaRecorder fallback. To turn recorded audio into text, set `STT_PROVIDER=deepgram` and add `DEEPGRAM_API_KEY` to `.env`. Chromium browsers continue using browser SpeechRecognition without this setting.
 
+Provider lookup is protected by bounded retries, per-endpoint circuit breakers, and an operation deadline. Tune these with `PROVIDER_DIRECTORY_OPERATION_TIMEOUT`, `PROVIDER_DIRECTORY_MAX_ATTEMPTS`, `PROVIDER_DIRECTORY_RETRY_BACKOFF`, `PROVIDER_DIRECTORY_CIRCUIT_FAILURE_THRESHOLD`, and `PROVIDER_DIRECTORY_CIRCUIT_OPEN_SECONDS`. The conversation service remains available when the directory is degraded and will not substitute unverified providers. Inspect dependency state at `/ready`.
+
 ## Repository Layout
 
 ```text

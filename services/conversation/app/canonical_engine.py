@@ -11,6 +11,7 @@ from libs.ai.proposal_adapter import ProposalAdapter, ProposalAdapterError, Prop
 from libs.ai.proposal_fallback import build_recovery_proposal
 from libs.conversation.domain import (
     AppointmentRequestResultData,
+    AvailabilityResultData,
     Channel,
     CompleteOperationCommand,
     ConversationSession,
@@ -44,6 +45,7 @@ from libs.conversation.provider_matching import (
 )
 from services.conversation.app.provider_directory import ProviderDirectory
 from services.conversation.app.practice_profile import PracticeProfileLookup
+from services.conversation.app.scheduling import MockSchedulingService
 from services.conversation.app.response_policy import ResponseDecision, build_response
 
 
@@ -62,10 +64,12 @@ class CanonicalConversationEngine:
         adapter: ProposalSource | None = None,
         provider_directory: ProviderDirectory | None = None,
         practice_profile: PracticeProfileLookup | None = None,
+        scheduling_service: MockSchedulingService | None = None,
     ) -> None:
         self.repository = InMemorySessionRepository()
         self.provider_directory = provider_directory or ProviderDirectory()
         self.practice_profile = practice_profile or PracticeProfileLookup()
+        self.scheduling_service = scheduling_service or MockSchedulingService()
         adapter = adapter or ProposalAdapter(load_llm_config())
         self.orchestrator = ConversationOrchestrator(
             self.repository,
@@ -90,6 +94,9 @@ class CanonicalConversationEngine:
         if not result.error:
             result = self._ensure_provider_operation(result)
             result = self._execute_provider_operation(result)
+            result = self._ensure_availability_operation(result)
+            result = self._execute_availability_operation(result)
+            result = self._execute_appointment_operation(result)
             result = self._execute_practice_profile_operation(result)
         decision = build_response(result)
         self._messages.setdefault(session_id, []).extend(
@@ -239,6 +246,113 @@ class CanonicalConversationEngine:
             events=result.events + (started_event, completed_event),
         )
 
+    def _ensure_availability_operation(self, result: OrchestrationResult) -> OrchestrationResult:
+        state = result.session.state
+        if (
+            state.active_task != TaskName.APPOINTMENT_REQUEST
+            or state.pending_operation
+            or "provider_id" not in state.slots
+            or not isinstance(state.last_operation_result, ProviderSearchResultData)
+        ):
+            return result
+        request_id = f"{state.session_id}:availability:{state.state_version}"
+        command = RequestOperationCommand(
+            session_id=state.session_id,
+            expected_state_version=state.state_version,
+            correlation_id=result.turn_event.correlation_id,
+            request_id=request_id,
+            operation=OperationName.GET_AVAILABILITY,
+            idempotency_key=request_id,
+        )
+        event = command_to_event(state, command)
+        committed = self.repository.commit_batch(
+            state.session_id,
+            state.state_version,
+            [event],
+        )
+        return replace(result, session=committed.session, events=result.events + (event,))
+
+    def _execute_availability_operation(self, result: OrchestrationResult) -> OrchestrationResult:
+        state = result.session.state
+        operation = state.pending_operation
+        if operation is None or operation.operation != OperationName.GET_AVAILABILITY:
+            return result
+        provider = state.slots.get("provider_id")
+        if provider is None:
+            return result
+        start_command = StartOperationCommand(
+            session_id=state.session_id,
+            expected_state_version=state.state_version,
+            correlation_id=operation.correlation_id,
+            request_id=operation.request_id,
+        )
+        started_event = command_to_event(state, start_command)
+        started_state = reduce_state(state, started_event)
+        availability = self.scheduling_service.get_availability(provider.value)
+        output = AvailabilityResultData(
+            provider_id=availability.provider_id,
+            slots=availability.slots,
+            source="mock_scheduling",
+            error=availability.error,
+            error_code="unavailable" if availability.error else None,
+        )
+        complete_command = CompleteOperationCommand(
+            session_id=started_state.session_id,
+            expected_state_version=started_state.state_version,
+            correlation_id=operation.correlation_id,
+            request_id=operation.request_id,
+            requested_state_version=operation.requested_state_version,
+            result=output,
+        )
+        completed_event = command_to_event(started_state, complete_command)
+        committed = self.repository.commit_batch(
+            state.session_id,
+            state.state_version,
+            [started_event, completed_event],
+        )
+        return replace(result, session=committed.session, events=result.events + (started_event, completed_event))
+
+    def _execute_appointment_operation(self, result: OrchestrationResult) -> OrchestrationResult:
+        state = result.session.state
+        operation = state.pending_operation
+        if operation is None or operation.operation != OperationName.CREATE_APPOINTMENT_REQUEST:
+            return result
+        preferred_time = state.slots.get("preferred_time")
+        if preferred_time is None:
+            return result
+        start_command = StartOperationCommand(
+            session_id=state.session_id,
+            expected_state_version=state.state_version,
+            correlation_id=operation.correlation_id,
+            request_id=operation.request_id,
+        )
+        started_event = command_to_event(state, start_command)
+        started_state = reduce_state(state, started_event)
+        submission = self.scheduling_service.submit_request(
+            idempotency_key=operation.idempotency_key,
+            preferred_time=preferred_time.value,
+        )
+        output = AppointmentRequestResultData(
+            request_reference=submission.request_reference,
+            status=submission.status,
+            error=submission.error,
+        )
+        complete_command = CompleteOperationCommand(
+            session_id=started_state.session_id,
+            expected_state_version=started_state.state_version,
+            correlation_id=operation.correlation_id,
+            request_id=operation.request_id,
+            requested_state_version=operation.requested_state_version,
+            result=output,
+        )
+        completed_event = command_to_event(started_state, complete_command)
+        committed = self.repository.commit_batch(
+            state.session_id,
+            state.state_version,
+            [started_event, completed_event],
+        )
+        return replace(result, session=committed.session, events=result.events + (started_event, completed_event))
+
     @staticmethod
     def _compact_state(session: ConversationSession, messages: list[dict[str, str]]) -> dict[str, Any]:
         state = session.state
@@ -382,6 +496,24 @@ class _PolicyAwareProposalSource:
                 cancel_requested=True,
             )
             return ProposalCompletion(proposal=proposal, model="policy", provider="guardrail")
+        if (
+            detected.name == "confirmation"
+            and state.active_task == TaskName.APPOINTMENT_REQUEST
+            and state.workflow_state == WorkflowState.REVIEWING_REQUEST
+        ):
+            proposal = ConversationProposal(
+                session_id=state.session_id,
+                based_on_state_version=state.state_version,
+                correlation_id=correlation_id,
+                intent=IntentName.CONFIRMATION,
+                dialogue_act=DialogueAct.CONFIRM,
+                confidence_band=ProposalConfidenceBand.HIGH,
+                tool_selection=ToolSelectionProposal(
+                    operation=OperationName.CREATE_APPOINTMENT_REQUEST,
+                    rationale="submit the reviewed appointment request after explicit confirmation",
+                ),
+            )
+            return ProposalCompletion(proposal=proposal, model="policy", provider="confirmation_policy")
         if detected.name == "correction":
             recovery = build_recovery_proposal(user_text, state, correlation_id)
             if recovery.corrections:
@@ -410,7 +542,7 @@ class _PolicyAwareProposalSource:
                 ),
             )
             return ProposalCompletion(proposal=proposal, model="policy", provider="retry_policy")
-        if state.provider_options:
+        if state.provider_options and state.workflow_state == WorkflowState.SELECTING_PROVIDER:
             provider = resolve_provider_reference(user_text, state.provider_options)
             if provider is not None:
                 slots = []

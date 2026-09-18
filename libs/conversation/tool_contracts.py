@@ -75,8 +75,20 @@ class GetPracticeProfileInput(BaseModel):
     tool_name: Literal[OperationName.GET_PRACTICE_PROFILE] = OperationName.GET_PRACTICE_PROFILE
 
 
+class GetAvailabilityInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: Literal[OperationName.GET_AVAILABILITY] = OperationName.GET_AVAILABILITY
+    provider_id: str = Field(min_length=1)
+
+
 ToolInput = Annotated[
-    Union[SearchProvidersInput, CreateAppointmentRequestInput, GetPracticeProfileInput],
+    Union[
+        SearchProvidersInput,
+        CreateAppointmentRequestInput,
+        GetPracticeProfileInput,
+        GetAvailabilityInput,
+    ],
     Field(discriminator="tool_name"),
 ]
 
@@ -116,6 +128,23 @@ class PracticeHoursOutput(BaseModel):
     closed: bool = False
 
 
+class AvailabilitySlotOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slot_id: str = Field(min_length=1)
+    start_at: str = Field(min_length=1)
+    end_at: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+
+
+class AvailabilityOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: Literal[OperationName.GET_AVAILABILITY] = OperationName.GET_AVAILABILITY
+    provider_id: str = Field(min_length=1)
+    slots: list[AvailabilitySlotOutput] = Field(default_factory=list)
+
+
 class PracticeProfileOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -132,7 +161,12 @@ class PracticeProfileOutput(BaseModel):
 
 
 ToolOutput = Annotated[
-    Union[ProviderSearchOutput, AppointmentRequestOutput, PracticeProfileOutput],
+    Union[
+        ProviderSearchOutput,
+        AvailabilityOutput,
+        AppointmentRequestOutput,
+        PracticeProfileOutput,
+    ],
     Field(discriminator="tool_name"),
 ]
 

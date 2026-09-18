@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from libs.conversation.domain import (
+    AppointmentRequestResultData,
     DomainInvariantError,
     StaleOperationResultError,
     OperationCancelledEvent,
@@ -186,6 +187,7 @@ def transition_for(state: Any, event: Any) -> TransitionDecision:
             else WorkflowState.EXECUTING
         )
     if isinstance(event, (SlotCapturedEvent, SlotCorrectedEvent)):
+        captured_slots = set(state.slots) | {event.slot}
         if isinstance(event, SlotCorrectedEvent) and event.slot in {
             "care_setting",
             "location",
@@ -203,13 +205,33 @@ def transition_for(state: Any, event: Any) -> TransitionDecision:
             "appointment_reason",
         }:
             target_state = WorkflowState.COLLECTING_CONTEXT
+        if (
+            state.active_task == TaskName.APPOINTMENT_REQUEST
+            and {
+                "provider_id",
+                "care_setting",
+                "location",
+                "appointment_reason",
+                "preferred_time",
+                "caller_name",
+                "callback_number",
+            }.issubset(captured_slots)
+        ):
+            target_state = WorkflowState.REVIEWING_REQUEST
     if isinstance(event, OperationSucceededEvent):
         operation = _require_operation(state, event.request_id, {"requested", "running"})
-        target_state = (
-            WorkflowState.SELECTING_PROVIDER
-            if operation.operation.value == "search_providers"
-            else WorkflowState.COMPLETED
-        )
+        if isinstance(event.result, AppointmentRequestResultData) and event.result.status == "failed":
+            target_state = WorkflowState.FAILED
+        else:
+            target_state = (
+                WorkflowState.SELECTING_PROVIDER
+                if operation.operation.value == "search_providers"
+                else (
+                    WorkflowState.COLLECTING_DETAILS
+                    if operation.operation.value == "get_availability"
+                    else WorkflowState.COMPLETED
+                )
+            )
     return TransitionDecision(
         event_type=event.event_type,
         source_state=state.workflow_state,

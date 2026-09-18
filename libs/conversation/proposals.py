@@ -306,6 +306,11 @@ def _validate_tool_selection(state: ConversationState, selection: ToolSelectionP
         missing = _REQUIRED_PROVIDER_SEARCH_SLOTS - state.slots.keys()
         if missing:
             raise ProposalValidationError(f"provider search is missing slots: {sorted(missing)}")
+    elif selection.operation == OperationName.GET_AVAILABILITY:
+        if state.active_task != TaskName.APPOINTMENT_REQUEST:
+            raise ProposalValidationError("availability lookup requires an appointment task")
+        if "provider_id" not in state.slots:
+            raise ProposalValidationError("availability lookup requires a selected provider")
     elif selection.operation == OperationName.CREATE_APPOINTMENT_REQUEST:
         missing = _REQUIRED_APPOINTMENT_SLOTS - state.slots.keys()
         if missing:

@@ -37,6 +37,16 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/ready")
+def ready() -> dict[str, object]:
+    return {
+        "status": "ready",
+        "dependencies": {
+            "provider_directory": canonical_engine.provider_directory.health(),
+        },
+    }
+
+
 @app.post("/v1/conversations/{session_id}/turn", response_model=ConversationTurnResponse)
 def create_turn(session_id: str, request: ConversationTurnRequest) -> ConversationTurnResponse:
     if conversation_engine == "canonical":
