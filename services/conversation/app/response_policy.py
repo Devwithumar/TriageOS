@@ -134,6 +134,8 @@ def build_response(result: OrchestrationResult) -> ResponseDecision:
         state.active_task != TaskName.NONE
         and proposal is not None
         and proposal.intent not in _WORKFLOW_INTENTS
+        and not proposal.slots
+        and not proposal.corrections
     ):
         return _general_response(proposal)
 
@@ -226,6 +228,21 @@ def _operation_response(result: OrchestrationResult) -> ResponseDecision | None:
         )
     if isinstance(result, AvailabilityResultData):
         if result.error:
+            if result.error_code == "not_configured":
+                return ResponseDecision(
+                    text=(
+                        "Appointment scheduling is not connected yet, so I can’t confirm availability "
+                        "or submit an appointment request."
+                    ),
+                    provider="scheduling",
+                    reason="scheduling provider not configured",
+                )
+            if result.source != "mock_scheduling":
+                return ResponseDecision(
+                    text="I couldn’t retrieve appointment availability. No appointment request was submitted.",
+                    provider="scheduling",
+                    reason="scheduling availability lookup failed",
+                )
             return ResponseDecision(
                 text="I couldn’t retrieve availability from the mock scheduler. No appointment request was submitted.",
                 provider="mock_scheduling",

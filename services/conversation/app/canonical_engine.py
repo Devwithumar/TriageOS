@@ -45,7 +45,7 @@ from libs.conversation.provider_matching import (
 )
 from services.conversation.app.provider_directory import ProviderDirectory
 from services.conversation.app.practice_profile import PracticeProfileLookup
-from services.conversation.app.scheduling import MockSchedulingService
+from services.conversation.app.scheduling import SchedulingService, build_scheduling_service
 from services.conversation.app.response_policy import ResponseDecision, build_response
 
 
@@ -64,12 +64,12 @@ class CanonicalConversationEngine:
         adapter: ProposalSource | None = None,
         provider_directory: ProviderDirectory | None = None,
         practice_profile: PracticeProfileLookup | None = None,
-        scheduling_service: MockSchedulingService | None = None,
+        scheduling_service: SchedulingService | None = None,
     ) -> None:
         self.repository = InMemorySessionRepository()
         self.provider_directory = provider_directory or ProviderDirectory()
         self.practice_profile = practice_profile or PracticeProfileLookup()
-        self.scheduling_service = scheduling_service or MockSchedulingService()
+        self.scheduling_service = scheduling_service or build_scheduling_service()
         adapter = adapter or ProposalAdapter(load_llm_config())
         self.orchestrator = ConversationOrchestrator(
             self.repository,
@@ -292,9 +292,9 @@ class CanonicalConversationEngine:
         output = AvailabilityResultData(
             provider_id=availability.provider_id,
             slots=availability.slots,
-            source="mock_scheduling",
+            source=availability.source,
             error=availability.error,
-            error_code="unavailable" if availability.error else None,
+            error_code=availability.error_code or ("unavailable" if availability.error else None),
         )
         complete_command = CompleteOperationCommand(
             session_id=started_state.session_id,

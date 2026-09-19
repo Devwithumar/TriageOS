@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import os
+from typing import Protocol
 
 from libs.conversation.domain import AvailabilitySlotRecord
 
@@ -12,7 +14,9 @@ from libs.conversation.domain import AvailabilitySlotRecord
 class AvailabilityResult:
     provider_id: str
     slots: list[AvailabilitySlotRecord]
+    source: str
     error: str | None = None
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,44 @@ class AppointmentSubmissionResult:
     request_reference: str
     status: str
     error: str | None = None
+
+
+class SchedulingService(Protocol):
+    def get_availability(self, provider_id: str) -> AvailabilityResult:
+        ...
+
+    def submit_request(
+        self,
+        *,
+        idempotency_key: str,
+        preferred_time: str,
+    ) -> AppointmentSubmissionResult:
+        ...
+
+
+class UnavailableSchedulingService:
+    """Fail closed until a real scheduling adapter is configured."""
+
+    def get_availability(self, provider_id: str) -> AvailabilityResult:
+        return AvailabilityResult(
+            provider_id=provider_id,
+            slots=[],
+            source="scheduling_unconfigured",
+            error="No scheduling provider is configured.",
+            error_code="not_configured",
+        )
+
+    def submit_request(
+        self,
+        *,
+        idempotency_key: str,
+        preferred_time: str,
+    ) -> AppointmentSubmissionResult:
+        return AppointmentSubmissionResult(
+            request_reference="not-created",
+            status="failed",
+            error="No scheduling provider is configured.",
+        )
 
 
 class MockSchedulingService:
@@ -43,7 +85,11 @@ class MockSchedulingService:
         self._submissions: dict[str, AppointmentSubmissionResult] = {}
 
     def get_availability(self, provider_id: str) -> AvailabilityResult:
-        return AvailabilityResult(provider_id=provider_id, slots=list(self._slots))
+        return AvailabilityResult(
+            provider_id=provider_id,
+            slots=list(self._slots),
+            source="mock_scheduling",
+        )
 
     def submit_request(
         self,
@@ -71,3 +117,10 @@ class MockSchedulingService:
         )
         self._submissions[idempotency_key] = result
         return result
+
+
+def build_scheduling_service() -> SchedulingService:
+    provider = os.getenv("SCHEDULING_PROVIDER", "unconfigured").strip().lower()
+    if provider == "mock":
+        return MockSchedulingService()
+    return UnavailableSchedulingService()

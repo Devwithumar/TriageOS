@@ -94,7 +94,11 @@ from services.conversation.app.provider_directory import (
     ProviderSearchResult,
 )
 from services.conversation.app.practice_profile import PracticeProfileLookup
-from services.conversation.app.scheduling import MockSchedulingService
+from services.conversation.app.scheduling import (
+    MockSchedulingService,
+    UnavailableSchedulingService,
+    build_scheduling_service,
+)
 
 VOICE_URL = os.getenv("TRIAGEOS_VOICE_URL", "http://localhost:8000")
 CONVERSATION_URL = os.getenv("TRIAGEOS_CONVERSATION_URL", "http://localhost:8001")
@@ -778,6 +782,31 @@ def test_mock_scheduling_slice(results: Results) -> None:
         results.ok("mock scheduling slice")
     except Exception as exc:
         results.fail("mock scheduling slice", str(exc))
+
+
+def test_scheduling_configuration(results: Results) -> None:
+    previous = os.environ.get("SCHEDULING_PROVIDER")
+    try:
+        os.environ["SCHEDULING_PROVIDER"] = "unconfigured"
+        unavailable = build_scheduling_service()
+        result = unavailable.get_availability("provider:configuration")
+        os.environ["SCHEDULING_PROVIDER"] = "mock"
+        mock = build_scheduling_service()
+        if (
+            not isinstance(unavailable, UnavailableSchedulingService)
+            or result.error_code != "not_configured"
+            or not isinstance(mock, MockSchedulingService)
+        ):
+            results.fail("scheduling configuration", "scheduling provider selection did not fail closed")
+            return
+        results.ok("scheduling configuration")
+    except Exception as exc:
+        results.fail("scheduling configuration", str(exc))
+    finally:
+        if previous is None:
+            os.environ.pop("SCHEDULING_PROVIDER", None)
+        else:
+            os.environ["SCHEDULING_PROVIDER"] = previous
 
 
 def test_reset_and_correction_boundaries(results: Results) -> None:
@@ -1734,6 +1763,7 @@ async def main() -> int:
     test_canonical_conversation_engine(results)
     test_practice_profile_slice(results)
     test_mock_scheduling_slice(results)
+    test_scheduling_configuration(results)
     test_reset_and_correction_boundaries(results)
     test_provider_lookup_boundary(results)
     test_provider_search_reliability(results)

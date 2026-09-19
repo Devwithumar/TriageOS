@@ -14,7 +14,7 @@ The Conversation Service now supports a structured receptionist workflow alongsi
 
 ## Deliberate Boundaries
 
-This slice does not yet connect to a calendar, send notifications, provide medical advice, or perform triage. If `TRIAGEOS_PRACTICE_PROFILE_PATH` is unset, practice facts remain unavailable rather than being invented. Appointment availability and booking will be added after the workflow is tested with a mocked scheduling tool.
+This slice does not yet connect to a calendar, send notifications, provide medical advice, or perform triage. If `TRIAGEOS_PRACTICE_PROFILE_PATH` is unset, practice facts remain unavailable rather than being invented. Appointment availability and booking are represented by an explicitly opt-in mock scheduler for deterministic local tests; the default runtime does not expose demonstration slots or claim to submit requests until a real scheduling adapter is configured.
 
 The profile file must contain the following versioned fields:
 
@@ -38,6 +38,6 @@ The default path is `config/practice_profile.json`; production deployments shoul
 
 ## Next Milestones
 
-1. Add a mocked scheduling tool with deterministic available slots
-2. Add confirmation and correction evaluation around scheduling
-3. Add calendar integration behind the scheduling service boundary
+1. Add a calendar integration behind the scheduling service boundary
+2. Add provider-specific availability normalization and idempotent submission
+3. Add notification delivery after confirmed scheduling
