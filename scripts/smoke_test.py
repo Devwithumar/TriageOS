@@ -7,6 +7,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -910,6 +912,189 @@ def test_google_calendar_adapter(results: Results) -> None:
                 os.environ[name] = value
 
 
+def test_google_calendar_conversation(results: Results) -> None:
+    env_names = (
+        "GOOGLE_CALENDAR_ACCESS_TOKEN",
+        "GOOGLE_CALENDAR_ID",
+        "SCHEDULING_TIMEZONE",
+        "SCHEDULING_WINDOW_DAYS",
+        "SCHEDULING_SLOT_MINUTES",
+        "SCHEDULING_WORKDAY_START",
+        "SCHEDULING_WORKDAY_END",
+    )
+    previous = {name: os.environ.get(name) for name in env_names}
+    requests = []
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def request(self, method, url, params=None, json=None):
+            requests.append({"method": method, "url": url, "params": params, "json": json})
+            request = httpx.Request(method, url)
+            if url.endswith("/freeBusy"):
+                return httpx.Response(
+                    200,
+                    json={"calendars": {"primary": {"busy": []}}},
+                    request=request,
+                )
+            return httpx.Response(200, json={"id": "conversation-event-123"}, request=request)
+
+    class ConversationProposalSource:
+        def propose(self, user_text, state, recent_messages, correlation_id):
+            normalized = user_text.lower()
+            if state.turn_count == 1:
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.APPOINTMENT_REQUEST,
+                    dialogue_act=DialogueAct.INFORM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                    requested_task=TaskName.APPOINTMENT_REQUEST,
+                    slots=[
+                        ProposedSlot(name="care_setting", value="hospital", source="user_explicit", confidence=1),
+                        ProposedSlot(name="location", value="London", source="user_explicit", confidence=1),
+                        ProposedSlot(
+                            name="appointment_reason",
+                            value="general consultation",
+                            source="user_explicit",
+                            confidence=1,
+                        ),
+                    ],
+                )
+            elif "option 2" in normalized and isinstance(state.last_operation_result, AvailabilityResultData):
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.GENERAL_CONVERSATION,
+                    dialogue_act=DialogueAct.INFORM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                    slots=[
+                        ProposedSlot(
+                            name="preferred_time",
+                            value=state.last_operation_result.slots[1].start_at,
+                            source="user_explicit",
+                            confidence=1,
+                        )
+                    ],
+                )
+            elif "my name is" in normalized:
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.GENERAL_CONVERSATION,
+                    dialogue_act=DialogueAct.INFORM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                    slots=[ProposedSlot(name="caller_name", value="Alex Morgan", source="user_explicit", confidence=1)],
+                )
+            elif "+44" in normalized:
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.GENERAL_CONVERSATION,
+                    dialogue_act=DialogueAct.INFORM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                    slots=[
+                        ProposedSlot(
+                            name="callback_number",
+                            value="+44 20 1234 5678",
+                            source="user_explicit",
+                            confidence=1,
+                        )
+                    ],
+                )
+            else:
+                proposal = ConversationProposal(
+                    session_id=state.session_id,
+                    based_on_state_version=state.state_version,
+                    correlation_id=correlation_id,
+                    intent=IntentName.CONFIRMATION,
+                    dialogue_act=DialogueAct.CONFIRM,
+                    confidence_band=ProposalConfidenceBand.HIGH,
+                )
+            return ProposalCompletion(proposal=proposal, model="fake", provider="fake")
+
+    class ConversationProviderDirectory:
+        def search(self, care_setting, location, reason=None):
+            return ProviderSearchResult(
+                location=location,
+                providers=[
+                    Provider(
+                        provider_id="provider:google-calendar",
+                        name="Verified London Hospital",
+                        address="1 Calendar Street, London",
+                        category=care_setting,
+                        latitude=51.5074,
+                        longitude=-0.1278,
+                        distance_km=1,
+                    )
+                ],
+            )
+
+    try:
+        os.environ.update(
+            {
+                "GOOGLE_CALENDAR_ACCESS_TOKEN": "synthetic-calendar-token",
+                "GOOGLE_CALENDAR_ID": "primary",
+                "SCHEDULING_TIMEZONE": "UTC",
+                "SCHEDULING_WINDOW_DAYS": "1",
+                "SCHEDULING_SLOT_MINUTES": "30",
+                "SCHEDULING_WORKDAY_START": "09:00",
+                "SCHEDULING_WORKDAY_END": "10:00",
+            }
+        )
+        scheduler = GoogleCalendarSchedulingService(
+            http_client_factory=lambda **kwargs: FakeClient(),
+            now=lambda: datetime(2026, 10, 1, 8, 0, tzinfo=timezone.utc),
+        )
+        engine = CanonicalConversationEngine(
+            ConversationProposalSource(),
+            ConversationProviderDirectory(),
+            scheduling_service=scheduler,
+        )
+        session_id = "google-calendar-conversation"
+        started = engine.handle_turn(session_id, "I need a hospital appointment in London for a consultation")
+        availability = engine.handle_turn(session_id, "option 1")
+        preferred = engine.handle_turn(session_id, "option 2")
+        named = engine.handle_turn(session_id, "My name is Alex Morgan")
+        phone = engine.handle_turn(session_id, "+44 20 1234 5678")
+        submitted = engine.handle_turn(session_id, "Yes, submit it")
+        if (
+            "verified london hospital" not in started.reply.lower()
+            or "available appointment times" not in availability.reply.lower()
+            or "name should" not in preferred.reply.lower()
+            or "phone number" not in named.reply.lower()
+            or "submit this request" not in phone.reply.lower()
+            or "connected scheduling service" not in submitted.reply.lower()
+            or submitted.state["structured_state"].get("appointment_status") != "completed"
+            or len(requests) != 2
+            or not requests[1]["json"]["extendedProperties"]["private"]["triageos_idempotency_key"].startswith(
+                "google-calendar-conversation:"
+            )
+        ):
+            results.fail(
+                "google calendar conversation",
+                f"unexpected replies={[started.reply, availability.reply, preferred.reply, named.reply, phone.reply, submitted.reply]}",
+            )
+            return
+        results.ok("google calendar conversation")
+    except Exception as exc:
+        results.fail("google calendar conversation", str(exc))
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def test_google_oauth_refresh(results: Results) -> None:
     env_names = (
         "GOOGLE_CALENDAR_ACCESS_TOKEN",
@@ -975,6 +1160,206 @@ def test_google_oauth_refresh(results: Results) -> None:
         results.ok("google oauth refresh")
     except Exception as exc:
         results.fail("google oauth refresh", str(exc))
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def test_google_oauth_security(results: Results) -> None:
+    env_names = (
+        "GOOGLE_CALENDAR_ACCESS_TOKEN",
+        "GOOGLE_CALENDAR_ACCESS_TOKEN_EXPIRES_IN",
+        "GOOGLE_CALENDAR_REFRESH_TOKEN",
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "GOOGLE_OAUTH_TOKEN_URL",
+        "GOOGLE_CALENDAR_ID",
+        "GOOGLE_CALENDAR_TOKEN_SKEW_SECONDS",
+    )
+    previous = {name: os.environ.get(name) for name in env_names}
+    secret_values = {
+        "GOOGLE_CALENDAR_ACCESS_TOKEN": "access-secret-value",
+        "GOOGLE_CALENDAR_REFRESH_TOKEN": "refresh-secret-value",
+        "GOOGLE_OAUTH_CLIENT_ID": "client-id-value",
+        "GOOGLE_OAUTH_CLIENT_SECRET": "client-secret-value",
+    }
+
+    class RecordingClient:
+        def __init__(self, records, response_factory, headers=None):
+            self.records = records
+            self.response_factory = response_factory
+            self.headers = headers or {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def request(self, method, url, params=None, data=None, json=None):
+            self.records.append(
+                {
+                    "method": method,
+                    "url": url,
+                    "params": params,
+                    "data": data,
+                    "json": json,
+                    "headers": self.headers,
+                }
+            )
+            return self.response_factory(method, url, params, data, json)
+
+    def response(status_code=200, payload=None, text=None, method="POST", url="https://oauth.test/token"):
+        response_kwargs = {"request": httpx.Request(method, url)}
+        if payload is not None:
+            response_kwargs["json"] = payload
+        elif text is not None:
+            response_kwargs["text"] = text
+        return httpx.Response(status_code, **response_kwargs)
+
+    try:
+        os.environ.update({name: "" for name in env_names})
+        os.environ["GOOGLE_CALENDAR_ID"] = "primary"
+        os.environ["GOOGLE_CALENDAR_TOKEN_SKEW_SECONDS"] = "60"
+        missing_calls = []
+        missing_service = GoogleCalendarSchedulingService(
+            http_client_factory=lambda **kwargs: RecordingClient(
+                missing_calls,
+                lambda *args: response(),
+                kwargs.get("headers"),
+            ),
+        )
+        missing_result = missing_service.get_availability("provider:missing")
+        if missing_result.error_code != "not_configured" or missing_calls:
+            results.fail("google oauth security", "missing credentials reached the calendar transport")
+            return
+
+        os.environ.update(secret_values)
+        os.environ["GOOGLE_CALENDAR_ACCESS_TOKEN_EXPIRES_IN"] = ""
+        calendar_calls = []
+        calendar_service = GoogleCalendarSchedulingService(
+            http_client_factory=lambda **kwargs: RecordingClient(
+                calendar_calls,
+                lambda method, url, params, data, payload: response(
+                    payload={"calendars": {"primary": {"busy": []}}},
+                    method=method,
+                    url=url,
+                ),
+                kwargs.get("headers"),
+            )
+        )
+        calendar_result = calendar_service.get_availability("provider:calendar")
+        calendar_headers = calendar_calls[0].get("headers") if calendar_calls else None
+        if calendar_result.error or len(calendar_calls) != 1:
+            results.fail("google oauth security", "static token calendar request failed")
+            return
+
+        refresh_calls = []
+        os.environ["GOOGLE_CALENDAR_ACCESS_TOKEN"] = ""
+        provider = GoogleAccessTokenProvider(
+            http_client_factory=lambda **kwargs: RecordingClient(
+                refresh_calls,
+                lambda method, url, params, data, payload: response(
+                    payload={"access_token": "fresh-token", "expires_in": 3600},
+                    method=method,
+                    url=url,
+                ),
+                kwargs.get("headers"),
+            )
+        )
+        if provider.get_access_token() != "fresh-token" or provider.get_access_token() != "fresh-token":
+            results.fail("google oauth security", "refresh token was not cached")
+            return
+        if (
+            len(refresh_calls) != 1
+            or "Authorization" in (refresh_calls[0].get("headers") or {})
+            or refresh_calls[0]["data"].get("client_secret") != secret_values["GOOGLE_OAUTH_CLIENT_SECRET"]
+        ):
+            results.fail("google oauth security", "refresh request headers or credentials were malformed")
+            return
+
+        clock = [1000.0]
+        expiry_calls = []
+        os.environ["GOOGLE_CALENDAR_ACCESS_TOKEN"] = "short-lived-token"
+        os.environ["GOOGLE_CALENDAR_ACCESS_TOKEN_EXPIRES_IN"] = "100"
+        os.environ["GOOGLE_CALENDAR_TOKEN_SKEW_SECONDS"] = "60"
+        expiring = GoogleAccessTokenProvider(
+            http_client_factory=lambda **kwargs: RecordingClient(
+                expiry_calls,
+                lambda method, url, params, data, payload: response(
+                    payload={"access_token": "renewed-token", "expires_in": 3600},
+                    method=method,
+                    url=url,
+                ),
+                kwargs.get("headers"),
+            ),
+            clock=lambda: clock[0],
+        )
+        if expiring.get_access_token() != "short-lived-token":
+            results.fail("google oauth security", "valid static token was not used")
+            return
+        clock[0] = 1050.0
+        if expiring.get_access_token() != "renewed-token" or len(expiry_calls) != 1:
+            results.fail("google oauth security", "expiring token was not refreshed within skew window")
+            return
+
+        failing_calls = []
+        os.environ["GOOGLE_CALENDAR_ACCESS_TOKEN"] = ""
+        os.environ["GOOGLE_CALENDAR_ACCESS_TOKEN_EXPIRES_IN"] = ""
+        failing = GoogleCalendarSchedulingService(
+            http_client_factory=lambda **kwargs: RecordingClient(
+                failing_calls,
+                lambda method, url, params, data, payload: response(
+                    status_code=401,
+                    text="invalid credential " + secret_values["GOOGLE_OAUTH_CLIENT_SECRET"],
+                    method=method,
+                    url=url,
+                ),
+                kwargs.get("headers"),
+            )
+        )
+        failed_result = failing.get_availability("provider:unauthorized")
+        if (
+            failed_result.error_code != "not_authorized"
+            or any(secret in str(failed_result) for secret in secret_values.values())
+        ):
+            results.fail("google oauth security", "authorization failure leaked credentials")
+            return
+
+        concurrent_calls = []
+        concurrent = GoogleAccessTokenProvider(
+            http_client_factory=lambda **kwargs: RecordingClient(
+                concurrent_calls,
+                lambda method, url, params, data, payload: (
+                    time.sleep(0.03)
+                    or response(
+                        payload={"access_token": "concurrent-token", "expires_in": 3600},
+                        method=method,
+                        url=url,
+                    )
+                ),
+                kwargs.get("headers"),
+            )
+        )
+        values = []
+        threads = [threading.Thread(target=lambda: values.append(concurrent.get_access_token())) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if len(values) != 8 or set(values) != {"concurrent-token"} or len(concurrent_calls) != 1:
+            results.fail("google oauth security", "concurrent refreshes were not serialized")
+            return
+
+        if not calendar_headers or calendar_headers.get("Authorization") != "Bearer access-secret-value":
+            results.fail("google oauth security", "calendar bearer token was not scoped correctly")
+            return
+        results.ok("google oauth security")
+    except Exception as exc:
+        results.fail("google oauth security", str(exc))
     finally:
         for name, value in previous.items():
             if value is None:
@@ -1939,7 +2324,9 @@ async def main() -> int:
     test_mock_scheduling_slice(results)
     test_scheduling_configuration(results)
     test_google_calendar_adapter(results)
+    test_google_calendar_conversation(results)
     test_google_oauth_refresh(results)
+    test_google_oauth_security(results)
     test_reset_and_correction_boundaries(results)
     test_provider_lookup_boundary(results)
     test_provider_search_reliability(results)

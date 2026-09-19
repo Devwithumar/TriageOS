@@ -249,6 +249,12 @@ def _operation_response(result: OrchestrationResult) -> ResponseDecision | None:
                 reason="mock availability lookup failed",
             )
         if not result.slots:
+            if result.source != "mock_scheduling":
+                return ResponseDecision(
+                    text="The selected provider has no available appointment times. No appointment request was submitted.",
+                    provider="scheduling",
+                    reason="connected scheduler returned no slots",
+                )
             return ResponseDecision(
                 text="The selected provider has no available mock slots. No appointment request was submitted.",
                 provider="mock_scheduling",
@@ -258,6 +264,12 @@ def _operation_response(result: OrchestrationResult) -> ResponseDecision | None:
             f"{index}. {slot.label}"
             for index, slot in enumerate(result.slots, start=1)
         )
+        if result.source != "mock_scheduling":
+            return ResponseDecision(
+                text=f"These are the available appointment times: {options}. Which one would you prefer?",
+                provider="scheduling",
+                reason="rendered connected scheduler availability",
+            )
         return ResponseDecision(
             text=f"These are the available demonstration slots: {options}. Which one would you prefer?",
             provider="mock_scheduling",
