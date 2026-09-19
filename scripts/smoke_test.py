@@ -95,6 +95,8 @@ from services.conversation.app.provider_directory import (
 )
 from services.conversation.app.practice_profile import PracticeProfileLookup
 from services.conversation.app.scheduling import (
+    AppointmentDetails,
+    GoogleCalendarSchedulingService,
     MockSchedulingService,
     UnavailableSchedulingService,
     build_scheduling_service,
@@ -807,6 +809,104 @@ def test_scheduling_configuration(results: Results) -> None:
             os.environ.pop("SCHEDULING_PROVIDER", None)
         else:
             os.environ["SCHEDULING_PROVIDER"] = previous
+
+
+def test_google_calendar_adapter(results: Results) -> None:
+    env_names = (
+        "GOOGLE_CALENDAR_ACCESS_TOKEN",
+        "GOOGLE_CALENDAR_ID",
+        "SCHEDULING_TIMEZONE",
+        "SCHEDULING_WINDOW_DAYS",
+        "SCHEDULING_SLOT_MINUTES",
+        "SCHEDULING_WORKDAY_START",
+        "SCHEDULING_WORKDAY_END",
+    )
+    previous = {name: os.environ.get(name) for name in env_names}
+    requests = []
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def request(self, method, url, params=None, json=None):
+            requests.append({"method": method, "url": url, "params": params, "json": json})
+            request = httpx.Request(method, url)
+            if url.endswith("/freeBusy"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "calendars": {
+                            "primary": {
+                                "busy": [
+                                    {
+                                        "start": "2026-10-01T09:00:00+00:00",
+                                        "end": "2026-10-01T09:30:00+00:00",
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    request=request,
+                )
+            return httpx.Response(200, json={"id": "event-123"}, request=request)
+
+    try:
+        os.environ.update(
+            {
+                "GOOGLE_CALENDAR_ACCESS_TOKEN": "test-token",
+                "GOOGLE_CALENDAR_ID": "primary",
+                "SCHEDULING_TIMEZONE": "UTC",
+                "SCHEDULING_WINDOW_DAYS": "1",
+                "SCHEDULING_SLOT_MINUTES": "30",
+                "SCHEDULING_WORKDAY_START": "09:00",
+                "SCHEDULING_WORKDAY_END": "10:00",
+            }
+        )
+        service = GoogleCalendarSchedulingService(
+            http_client_factory=lambda **kwargs: FakeClient(),
+            now=lambda: datetime(2026, 10, 1, 8, 0, tzinfo=timezone.utc),
+        )
+        availability = service.get_availability("provider:calendar")
+        if (
+            availability.error
+            or len(availability.slots) != 1
+            or availability.slots[0].start_at != "2026-10-01T09:30:00+00:00"
+        ):
+            results.fail("google calendar adapter", f"busy-time filtering failed: {availability}")
+            return
+        submission = service.submit_request(
+            idempotency_key="calendar-idempotency",
+            preferred_time=availability.slots[0].start_at,
+            details=AppointmentDetails(
+                provider_id="provider:calendar",
+                preferred_time=availability.slots[0].start_at,
+                caller_name="Alex Morgan",
+                callback_number="+44 20 1234 5678",
+                appointment_reason="consultation",
+            ),
+        )
+        if (
+            submission.status != "submitted"
+            or submission.source != "google_calendar"
+            or submission.request_reference != "google:event-123"
+            or len(requests) != 2
+            or requests[1]["json"]["extendedProperties"]["private"]["triageos_idempotency_key"]
+            != "calendar-idempotency"
+        ):
+            results.fail("google calendar adapter", f"event submission failed: {submission}")
+            return
+        results.ok("google calendar adapter")
+    except Exception as exc:
+        results.fail("google calendar adapter", str(exc))
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def test_reset_and_correction_boundaries(results: Results) -> None:
@@ -1764,6 +1864,7 @@ async def main() -> int:
     test_practice_profile_slice(results)
     test_mock_scheduling_slice(results)
     test_scheduling_configuration(results)
+    test_google_calendar_adapter(results)
     test_reset_and_correction_boundaries(results)
     test_provider_lookup_boundary(results)
     test_provider_search_reliability(results)

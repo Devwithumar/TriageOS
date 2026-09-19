@@ -148,6 +148,7 @@ class AppointmentRequestResultData(BaseModel):
     result_type: Literal["appointment_request"] = "appointment_request"
     request_reference: str = Field(min_length=1)
     status: Literal["submitted", "failed"]
+    source: str = Field(default="scheduling")
     error: str | None = None
 
 

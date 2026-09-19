@@ -45,7 +45,11 @@ from libs.conversation.provider_matching import (
 )
 from services.conversation.app.provider_directory import ProviderDirectory
 from services.conversation.app.practice_profile import PracticeProfileLookup
-from services.conversation.app.scheduling import SchedulingService, build_scheduling_service
+from services.conversation.app.scheduling import (
+    AppointmentDetails,
+    SchedulingService,
+    build_scheduling_service,
+)
 from services.conversation.app.response_policy import ResponseDecision, build_response
 
 
@@ -331,10 +335,18 @@ class CanonicalConversationEngine:
         submission = self.scheduling_service.submit_request(
             idempotency_key=operation.idempotency_key,
             preferred_time=preferred_time.value,
+            details=AppointmentDetails(
+                provider_id=state.slots["provider_id"].value,
+                preferred_time=preferred_time.value,
+                caller_name=state.slots["caller_name"].value,
+                callback_number=state.slots["callback_number"].value,
+                appointment_reason=state.slots["appointment_reason"].value,
+            ),
         )
         output = AppointmentRequestResultData(
             request_reference=submission.request_reference,
             status=submission.status,
+            source=submission.source,
             error=submission.error,
         )
         complete_command = CompleteOperationCommand(

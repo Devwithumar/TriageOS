@@ -72,7 +72,7 @@ Firefox uses the MediaRecorder fallback. To turn recorded audio into text, set `
 
 Provider lookup is protected by bounded retries, per-endpoint circuit breakers, and an operation deadline. Tune these with `PROVIDER_DIRECTORY_OPERATION_TIMEOUT`, `PROVIDER_DIRECTORY_MAX_ATTEMPTS`, `PROVIDER_DIRECTORY_RETRY_BACKOFF`, `PROVIDER_DIRECTORY_CIRCUIT_FAILURE_THRESHOLD`, and `PROVIDER_DIRECTORY_CIRCUIT_OPEN_SECONDS`. The conversation service remains available when the directory is degraded and will not substitute unverified providers. Inspect dependency state at `/ready`.
 
-Scheduling is fail-closed by default. Set `SCHEDULING_PROVIDER=mock` only for deterministic local demonstrations; production scheduling adapters will be added behind the same service boundary.
+Scheduling is fail-closed by default. Set `SCHEDULING_PROVIDER=mock` only for deterministic local demonstrations. `SCHEDULING_PROVIDER=google_calendar` enables the configured Google Calendar adapter, which requires an access token and calendar ID; missing credentials fail closed without making a request.
 
 ## Repository Layout
 

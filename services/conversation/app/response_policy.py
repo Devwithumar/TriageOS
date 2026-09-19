@@ -265,13 +265,22 @@ def _operation_response(result: OrchestrationResult) -> ResponseDecision | None:
         )
     if isinstance(result, AppointmentRequestResultData):
         if result.status == "submitted":
+            if result.source == "mock_scheduling":
+                return ResponseDecision(
+                    text=(
+                        f"Your appointment request was submitted to the mock scheduler. Reference: {result.request_reference}. "
+                        "This is a demonstration only; no real appointment was booked."
+                    ),
+                    provider="mock_scheduling",
+                    reason="mock appointment request submitted",
+                )
             return ResponseDecision(
                 text=(
-                    f"Your appointment request was submitted to the mock scheduler. Reference: {result.request_reference}. "
-                    "This is a demonstration only; no real appointment was booked."
+                    f"Your appointment request was submitted to the connected scheduling service. "
+                    f"Reference: {result.request_reference}."
                 ),
-                provider="mock_scheduling",
-                reason="mock appointment request submitted",
+                provider=result.source,
+                reason="appointment request submitted",
             )
         return ResponseDecision(
             text="The appointment request could not be submitted, so no appointment was booked.",
