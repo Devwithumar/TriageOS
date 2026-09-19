@@ -96,6 +96,7 @@ from services.conversation.app.provider_directory import (
 from services.conversation.app.practice_profile import PracticeProfileLookup
 from services.conversation.app.scheduling import (
     AppointmentDetails,
+    GoogleAccessTokenProvider,
     GoogleCalendarSchedulingService,
     MockSchedulingService,
     UnavailableSchedulingService,
@@ -901,6 +902,79 @@ def test_google_calendar_adapter(results: Results) -> None:
         results.ok("google calendar adapter")
     except Exception as exc:
         results.fail("google calendar adapter", str(exc))
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def test_google_oauth_refresh(results: Results) -> None:
+    env_names = (
+        "GOOGLE_CALENDAR_ACCESS_TOKEN",
+        "GOOGLE_CALENDAR_REFRESH_TOKEN",
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "GOOGLE_OAUTH_TOKEN_URL",
+    )
+    previous = {name: os.environ.get(name) for name in env_names}
+    refresh_requests = []
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def request(self, method, url, data=None, **kwargs):
+            refresh_requests.append({"method": method, "url": url, "data": data})
+            return httpx.Response(
+                200,
+                json={"access_token": "refreshed-token", "expires_in": 3600},
+                request=httpx.Request(method, url),
+            )
+
+    try:
+        os.environ.update(
+            {
+                "GOOGLE_CALENDAR_ACCESS_TOKEN": "",
+                "GOOGLE_CALENDAR_REFRESH_TOKEN": "refresh-token",
+                "GOOGLE_OAUTH_CLIENT_ID": "client-id",
+                "GOOGLE_OAUTH_CLIENT_SECRET": "client-secret",
+                "GOOGLE_OAUTH_TOKEN_URL": "https://oauth.test/token",
+            }
+        )
+        provider = GoogleAccessTokenProvider(
+            http_client_factory=lambda **kwargs: FakeClient(),
+            clock=lambda: 1000,
+        )
+        first = provider.get_access_token()
+        second = provider.get_access_token()
+        if (
+            first != "refreshed-token"
+            or second != first
+            or len(refresh_requests) != 1
+            or refresh_requests[0]["data"]["grant_type"] != "refresh_token"
+        ):
+            results.fail("google oauth refresh", "refresh token was not exchanged and reused correctly")
+            return
+        os.environ["GOOGLE_CALENDAR_REFRESH_TOKEN"] = ""
+        os.environ["GOOGLE_OAUTH_CLIENT_ID"] = ""
+        os.environ["GOOGLE_OAUTH_CLIENT_SECRET"] = ""
+        missing = GoogleAccessTokenProvider(clock=lambda: 1000)
+        missing_error = None
+        try:
+            missing.get_access_token()
+        except Exception as exc:
+            missing_error = exc
+        if getattr(missing_error, "error_code", None) != "not_configured":
+            results.fail("google oauth refresh", "missing OAuth credentials did not fail closed")
+            return
+        results.ok("google oauth refresh")
+    except Exception as exc:
+        results.fail("google oauth refresh", str(exc))
     finally:
         for name, value in previous.items():
             if value is None:
@@ -1865,6 +1939,7 @@ async def main() -> int:
     test_mock_scheduling_slice(results)
     test_scheduling_configuration(results)
     test_google_calendar_adapter(results)
+    test_google_oauth_refresh(results)
     test_reset_and_correction_boundaries(results)
     test_provider_lookup_boundary(results)
     test_provider_search_reliability(results)

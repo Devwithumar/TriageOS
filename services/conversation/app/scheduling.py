@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 import hashlib
 import os
+import threading
+import time as monotonic_clock
 from typing import Protocol
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -39,6 +41,89 @@ class AppointmentDetails:
     caller_name: str
     callback_number: str
     appointment_reason: str
+
+
+class GoogleCalendarAuthError(RuntimeError):
+    def __init__(self, message: str, error_code: str = "not_configured") -> None:
+        super().__init__(message)
+        self.error_code = error_code
+
+
+class GoogleAccessTokenProvider:
+    """Provide a usable Google access token from static or refresh-token credentials."""
+
+    def __init__(self, http_client_factory=httpx.Client, clock=None) -> None:
+        self._access_token = os.getenv("GOOGLE_CALENDAR_ACCESS_TOKEN", "").strip()
+        self._refresh_token = os.getenv("GOOGLE_CALENDAR_REFRESH_TOKEN", "").strip()
+        self._client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+        self._client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+        self._token_url = os.getenv(
+            "GOOGLE_OAUTH_TOKEN_URL",
+            "https://oauth2.googleapis.com/token",
+        )
+        self._request_timeout = float(os.getenv("SCHEDULING_REQUEST_TIMEOUT", "8"))
+        self._token_skew_seconds = max(
+            0, int(os.getenv("GOOGLE_CALENDAR_TOKEN_SKEW_SECONDS", "60"))
+        )
+        expires_in = os.getenv("GOOGLE_CALENDAR_ACCESS_TOKEN_EXPIRES_IN", "")
+        self._expires_at = (
+            (clock or monotonic_clock.monotonic)() + max(0, int(expires_in))
+            if expires_in
+            else None
+        )
+        self._http_client_factory = http_client_factory
+        self._clock = clock or monotonic_clock.monotonic
+        self._lock = threading.Lock()
+
+    @property
+    def configured(self) -> bool:
+        return bool(self._access_token or (self._refresh_token and self._client_id and self._client_secret))
+
+    def get_access_token(self) -> str:
+        with self._lock:
+            if self._access_token and (
+                self._expires_at is None
+                or self._clock() < self._expires_at - self._token_skew_seconds
+            ):
+                return self._access_token
+            if not (self._refresh_token and self._client_id and self._client_secret):
+                raise GoogleCalendarAuthError(
+                    "Google OAuth refresh credentials are not configured.",
+                    "not_configured",
+                )
+            try:
+                with self._http_client_factory(
+                    timeout=self._request_timeout,
+                    headers={"Accept": "application/json"},
+                ) as client:
+                    response = client.request(
+                        "POST",
+                        self._token_url,
+                        data={
+                            "client_id": self._client_id,
+                            "client_secret": self._client_secret,
+                            "refresh_token": self._refresh_token,
+                            "grant_type": "refresh_token",
+                        },
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+            except httpx.TimeoutException as exc:
+                raise GoogleCalendarAuthError(
+                    "Google OAuth token refresh timed out.",
+                    "timeout",
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                code = "not_authorized" if exc.response.status_code in {400, 401, 403} else "unavailable"
+                raise GoogleCalendarAuthError("Google OAuth token refresh failed.", code) from exc
+            except httpx.HTTPError as exc:
+                raise GoogleCalendarAuthError("Google OAuth token refresh is unavailable.", "unavailable") from exc
+            if not isinstance(payload, dict) or not payload.get("access_token"):
+                raise GoogleCalendarAuthError("Google OAuth returned no access token.", "invalid_response")
+            self._access_token = str(payload["access_token"])
+            expires_in = int(payload.get("expires_in", 3600))
+            self._expires_at = self._clock() + max(0, expires_in)
+            return self._access_token
 
 
 class SchedulingService(Protocol):
@@ -146,8 +231,7 @@ class MockSchedulingService:
 class GoogleCalendarSchedulingService:
     """Use Google Calendar free/busy and event APIs when explicitly configured."""
 
-    def __init__(self, http_client_factory=httpx.Client, now=None) -> None:
-        self._access_token = os.getenv("GOOGLE_CALENDAR_ACCESS_TOKEN", "").strip()
+    def __init__(self, http_client_factory=httpx.Client, now=None, token_provider=None) -> None:
         self._calendar_id = os.getenv("GOOGLE_CALENDAR_ID", "").strip()
         self._base_url = os.getenv(
             "GOOGLE_CALENDAR_BASE_URL",
@@ -170,6 +254,7 @@ class GoogleCalendarSchedulingService:
         )
         self._request_timeout = float(os.getenv("SCHEDULING_REQUEST_TIMEOUT", "8"))
         self._http_client_factory = http_client_factory
+        self._token_provider = token_provider or GoogleAccessTokenProvider(http_client_factory=http_client_factory)
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     def get_availability(self, provider_id: str) -> AvailabilityResult:
@@ -194,6 +279,14 @@ class GoogleCalendarSchedulingService:
                 provider_id=provider_id,
                 slots=self._build_slots(now, busy)[: self._max_slots],
                 source="google_calendar",
+            )
+        except GoogleCalendarAuthError as exc:
+            return AvailabilityResult(
+                provider_id=provider_id,
+                slots=[],
+                source="google_calendar",
+                error="Google Calendar authentication is unavailable.",
+                error_code=exc.error_code,
             )
         except httpx.TimeoutException:
             return AvailabilityResult(
@@ -227,7 +320,7 @@ class GoogleCalendarSchedulingService:
         preferred_time: str,
         details: AppointmentDetails | None = None,
     ) -> AppointmentSubmissionResult:
-        if not self._access_token or not self._calendar_id:
+        if not self._token_provider.configured or not self._calendar_id:
             return AppointmentSubmissionResult(
                 request_reference="not-created",
                 status="failed",
@@ -274,6 +367,13 @@ class GoogleCalendarSchedulingService:
                 status="submitted",
                 source="google_calendar",
             )
+        except GoogleCalendarAuthError as exc:
+            return AppointmentSubmissionResult(
+                request_reference="not-created",
+                status="failed",
+                source="google_calendar",
+                error="Google Calendar authentication is unavailable.",
+            )
         except ValueError:
             return AppointmentSubmissionResult(
                 request_reference="not-created",
@@ -304,7 +404,7 @@ class GoogleCalendarSchedulingService:
             )
 
     def _configuration_error(self, provider_id: str) -> AvailabilityResult | None:
-        if self._access_token and self._calendar_id:
+        if self._token_provider.configured and self._calendar_id:
             return None
         return AvailabilityResult(
             provider_id=provider_id,
@@ -315,8 +415,9 @@ class GoogleCalendarSchedulingService:
         )
 
     def _request(self, method: str, url: str, *, json: dict, params: dict | None = None) -> dict:
+        access_token = self._token_provider.get_access_token()
         headers = {
-            "Authorization": f"Bearer {self._access_token}",
+            "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
