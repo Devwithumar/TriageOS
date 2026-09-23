@@ -53,6 +53,14 @@ uvicorn services.conversation.app.main:app --reload --port 8001
 uvicorn services.voice.app.main:app --reload --port 8000
 ```
 
+For a consistent local startup with dependency validation and readiness checks, use one command instead:
+
+```powershell
+.\scripts\start_local.ps1
+```
+
+The launcher starts or reuses both services, waits for `/ready` on each service, and prints the relevant startup log if readiness fails.
+
 Then open:
 
 ```text
