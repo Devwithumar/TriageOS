@@ -6,7 +6,7 @@ import httpx
 
 class ConversationClient:
     def __init__(self) -> None:
-        self._base_url = os.getenv("CONVERSATION_SERVICE_URL", "http://localhost:8001")
+        self._base_url = os.getenv("CONVERSATION_SERVICE_URL", "http://127.0.0.1:8001")
 
     async def create_turn(self, session_id: str, text: str) -> dict:
         for attempt in range(3):
