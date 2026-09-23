@@ -2,10 +2,12 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from libs.observability.logging import configure_logging
+from libs.ai.config import load_llm_config
 from services.conversation.app.agent import generate_reply
 from services.conversation.app.canonical_engine import CanonicalConversationEngine
 from services.conversation.app.state import ConversationStateStore, compact_state
@@ -38,13 +40,41 @@ def health() -> dict[str, str]:
 
 
 @app.get("/ready")
-def ready() -> dict[str, object]:
-    return {
-        "status": "ready",
+def ready() -> JSONResponse:
+    llm = load_llm_config()
+    llm_ready = llm.provider == "stub" or bool(llm.api_key)
+    llm_check = {
+        "status": "ready" if llm_ready else "not_ready",
+        "provider": llm.provider,
+        "model": llm.model,
+    }
+
+    provider_directory = canonical_engine.provider_directory.health()
+    directory_ready = (
+        provider_directory.get("provider") == "osm"
+        and provider_directory.get("status") == "ready"
+    )
+    directory_check = {
+        **provider_directory,
+        "status": (
+            provider_directory.get("status", "not_ready")
+            if directory_ready
+            else "not_ready"
+        ),
+    }
+    state_check = state_store.readiness()
+    state_ready = state_check["status"] in {"ready", "disabled"}
+    overall_ready = llm_ready and directory_ready and state_ready
+    payload = {
+        "status": "ready" if overall_ready else "not_ready",
+        "engine": conversation_engine,
         "dependencies": {
-            "provider_directory": canonical_engine.provider_directory.health(),
+            "llm": llm_check,
+            "provider_directory": directory_check,
+            "state_store": state_check,
         },
     }
+    return JSONResponse(status_code=200 if overall_ready else 503, content=payload)
 
 
 @app.post("/v1/conversations/{session_id}/turn", response_model=ConversationTurnResponse)

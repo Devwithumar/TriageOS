@@ -12,6 +12,15 @@ class ConversationStateStore:
         self._structured_state: dict[str, dict[str, Any]] = {}
         self._redis = redis.from_url(redis_url, decode_responses=True) if redis_url else None
 
+    def readiness(self) -> dict[str, object]:
+        if self._redis is None:
+            return {"status": "disabled", "mode": "memory"}
+        try:
+            self._redis.ping()
+        except redis.RedisError as exc:
+            return {"status": "not_ready", "mode": "redis", "error": type(exc).__name__}
+        return {"status": "ready", "mode": "redis"}
+
     def get_recent_messages(self, session_id: str, limit: int = 8) -> list[dict[str, str]]:
         messages = self._read_messages(session_id)
         return messages[-limit:]

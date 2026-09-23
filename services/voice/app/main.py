@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import os
 import time
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
@@ -31,6 +33,45 @@ if frontend_path.exists():
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def ready() -> JSONResponse:
+    stt_provider = os.getenv("STT_PROVIDER", "stub").strip().lower()
+    stt_configured = stt_provider == "stub" or (
+        stt_provider == "deepgram" and bool(os.getenv("DEEPGRAM_API_KEY", "").strip())
+    )
+    stt_check = {
+        "status": "ready" if stt_configured else "not_ready",
+        "provider": stt_provider,
+    }
+
+    conversation_url = os.getenv("CONVERSATION_SERVICE_URL", "http://127.0.0.1:8001").rstrip("/")
+    conversation_check: dict[str, object]
+    try:
+        response = httpx.get(f"{conversation_url}/ready", timeout=2.0)
+        body = response.json()
+        downstream_ready = isinstance(body, dict) and body.get("status") == "ready"
+        conversation_check = {
+            "status": "ready" if response.status_code == 200 and downstream_ready else "not_ready",
+            "url": conversation_url,
+        }
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
+        conversation_check = {
+            "status": "not_ready",
+            "url": conversation_url,
+            "error": type(exc).__name__,
+        }
+
+    overall_ready = stt_configured and conversation_check["status"] == "ready"
+    payload = {
+        "status": "ready" if overall_ready else "not_ready",
+        "dependencies": {
+            "stt": stt_check,
+            "conversation_service": conversation_check,
+        },
+    }
+    return JSONResponse(status_code=200 if overall_ready else 503, content=payload)
 
 
 @app.get("/")
