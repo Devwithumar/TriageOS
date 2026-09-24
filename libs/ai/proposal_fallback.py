@@ -2,7 +2,7 @@
 
 import re
 
-from libs.ai.conversation_intelligence import detect_intent
+from libs.ai.conversation_intelligence import canonical_care_setting, detect_intent
 from libs.conversation.contracts import DialogueAct, IntentName
 from libs.conversation.domain import (
     AvailabilityResultData,
@@ -137,30 +137,21 @@ def _resolve_availability_slot(
 
 def _extract_provider_lookup_slots(user_text: str) -> list[ProposedSlot]:
     normalized = " ".join(user_text.lower().split())
-    provider_terms = (
-        "emergency department",
-        "primary care",
-        "veterinary",
-        "hospital",
-        "clinic",
-        "doctor",
-        "dentist",
-        "pharmacy",
-        "provider",
-        "vet",
-    )
-    care_setting = next((term for term in provider_terms if term in normalized), None)
+    care_setting = canonical_care_setting(user_text)
+    if care_setting is None and "provider" in normalized:
+        care_setting = "doctor"
+    conjunction = r"\s*(?:,\s*)?(?:and|but|so|plus)\s+(?:i|we|please|want|wanna|need|would|looking|trying|hoping|just)\b"
     location_match = re.search(
         r"\b(?:i\s+(?:am|'m)|we\s+(?:are|'re)|live|located|based|stay)\s+"
         r"(?:in|at|near)\s+(?P<location>[^?.!;]+?)"
-        r"(?=\s+(?:and|but)\s+(?:i|we|please|want|need|would|looking)\b|[?.!;]|$)",
+        rf"(?={conjunction}|[?.!;]|$)",
         user_text,
         re.IGNORECASE,
     )
     if location_match is None:
         location_match = re.search(
             r"\b(?:near|in|around|at|close to)\s+(?P<location>[^?.!;]+?)"
-            r"(?=\s+(?:and|but)\s+(?:i|we|please|want|need|would|looking)\b|[?.!;]|$)",
+            rf"(?={conjunction}|[?.!;]|$)",
             user_text,
             re.IGNORECASE,
         )

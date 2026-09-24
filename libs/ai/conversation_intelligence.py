@@ -28,10 +28,12 @@ HEALTHCARE_TERMS = (
 RECEPTIONIST_TERMS = (
     "appointment",
     "book a visit",
+    "book in",
     "schedule",
     "reschedule",
     "cancel my appointment",
     "see a doctor",
+    "make an appointment",
     "available slot",
     "availability",
 )
@@ -69,12 +71,31 @@ PROVIDER_TERMS = (
     "clinic",
     "hospital",
     "doctor",
+    "doc",
+    "gp",
+    "general practitioner",
+    "medical center",
+    "medical centre",
+    "health center",
+    "health centre",
     "dentist",
     "dental",
     "veterinary",
     "vet",
+    "animal doctor",
+    "pet doctor",
     "pharmacy",
     "emergency department",
+    "emergency room",
+)
+
+GENERIC_PROVIDER_LOOKUP_TERMS = (
+    "get checked",
+    "get seen",
+    "get looked at",
+    "somewhere for care",
+    "somewhere to be seen",
+    "medical help",
 )
 
 LOCAL_LOOKUP_MARKERS = (
@@ -91,6 +112,18 @@ LOCAL_LOOKUP_MARKERS = (
     "close to me",
     "close to where",
     "near where",
+    "around here",
+    "round here",
+    "around me",
+    "by me",
+    "close by",
+    "somewhere nearby",
+    "somewhere close",
+    "in my area",
+    "where i'm at",
+    "where i am",
+    "not far",
+    "find me",
     "where i live",
     "closest",
     "nearest",
@@ -174,8 +207,12 @@ def detect_intent(text: str) -> ConversationIntent:
         return ConversationIntent("capabilities", 0.96, topic, True)
     if _is_practice_information_question(normalized):
         return ConversationIntent("practice_information", 0.94, topic, True)
-    if any(term in normalized for term in PROVIDER_TERMS) and any(
+    if (
+        (any(term in normalized for term in PROVIDER_TERMS)
+         or any(term in normalized for term in GENERIC_PROVIDER_LOOKUP_TERMS))
+        and any(
         marker in normalized for marker in LOCAL_LOOKUP_MARKERS
+        )
     ):
         return ConversationIntent("provider_lookup", 0.94, topic, True)
     if any(greeting in normalized.split() for greeting in ("hello", "hi", "hey", "good morning", "good afternoon")):
@@ -219,6 +256,38 @@ def extract_topic(text: str) -> str | None:
     stop_words = {"this", "that", "with", "about", "have", "from", "would", "could", "like", "just", "really"}
     meaningful = [word for word in words if len(word) > 3 and word not in stop_words]
     return " ".join(meaningful[:4]) or None
+
+
+def canonical_care_setting(text: str) -> str | None:
+    """Map informal care references to a directory-compatible category."""
+
+    normalized = " ".join(text.lower().split())
+    aliases = (
+        ("veterinary", ("veterinary", "vet clinic", "vet", "animal doctor", "pet doctor")),
+        ("dental", ("dentist", "dental")),
+        ("hospital", ("hospital", "emergency department", "emergency room")),
+        ("clinic", ("clinic",)),
+        (
+            "doctor",
+            (
+                "doctor",
+                "doc",
+                "gp",
+                "general practitioner",
+                "medical center",
+                "medical centre",
+                "health center",
+                "health centre",
+                "pharmacy",
+            ),
+        ),
+    )
+    for canonical, values in aliases:
+        if any(re.search(rf"\b{re.escape(value)}\b", normalized) for value in values):
+            return canonical
+    if any(term in normalized for term in GENERIC_PROVIDER_LOOKUP_TERMS):
+        return "doctor"
+    return None
 
 
 def build_context(recent_messages: list[dict[str, str]], intent: ConversationIntent) -> dict[str, object]:

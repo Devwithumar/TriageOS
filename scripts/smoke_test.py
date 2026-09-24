@@ -1486,6 +1486,8 @@ def test_provider_lookup_boundary(results: Results) -> None:
             ("I'm in Greater London and I want to find a clinic.", "clinic", "Greater London"),
             ("Could you look for a doctor in Toronto?", "doctor", "Toronto"),
             ("I live around Nairobi and need a hospital.", "hospital", "Nairobi"),
+            ("I wanna find a doc close by in Toronto.", "doctor", "Toronto"),
+            ("I am round here in Greater London and need somewhere to get checked.", "doctor", "Greater London"),
         )
         for index, (text, expected_care, expected_location) in enumerate(cases):
             proposal = build_recovery_proposal(
@@ -1501,6 +1503,19 @@ def test_provider_lookup_boundary(results: Results) -> None:
             ):
                 results.fail("provider lookup boundary", f"unexpected proposal={proposal}")
                 return
+        no_location = build_recovery_proposal(
+            "Can you find me a vet clinic around me?",
+            DomainConversationState(session_id="provider-lookup-informal"),
+            "provider-lookup-informal-correlation",
+        )
+        no_location_slots = {slot.name: slot.value for slot in no_location.slots}
+        if (
+            no_location.intent != IntentName.PROVIDER_LOOKUP
+            or no_location.requested_task != TaskName.PROVIDER_LOOKUP
+            or no_location_slots != {"care_setting": "veterinary"}
+        ):
+            results.fail("provider lookup boundary", f"informal no-location proposal={no_location}")
+            return
         results.ok("provider lookup boundary")
     except Exception as exc:
         results.fail("provider lookup boundary", str(exc))
