@@ -93,6 +93,7 @@ from services.conversation.app.provider_directory import (
     Provider,
     ProviderDirectory,
     ProviderDirectoryError,
+    ProviderDirectoryTimeout,
     ProviderSearchResult,
 )
 from services.conversation.app.practice_profile import PracticeProfileLookup
@@ -1700,6 +1701,27 @@ def test_provider_search_reliability(results: Results) -> None:
         )
         if retry_attempts != 2 or payload != {"elements": []}:
             results.fail("provider transport resilience", "transient failure did not recover")
+            return
+
+        pacing_directory = ProviderDirectory()
+        pacing_directory._last_nominatim_request = time.monotonic()
+        pacing_requests = 0
+
+        def pacing_request(*args, **kwargs):
+            nonlocal pacing_requests
+            pacing_requests += 1
+            return []
+
+        pacing_directory._request_json = pacing_request
+        try:
+            pacing_directory._nominatim_search({}, deadline=time.monotonic() + 0.01)
+        except ProviderDirectoryTimeout:
+            pass
+        else:
+            results.fail("provider transport resilience", "Nominatim pacing ignored the operation deadline")
+            return
+        if pacing_requests:
+            results.fail("provider transport resilience", "Nominatim request started after deadline budget expired")
             return
 
         circuit_directory = ProviderDirectory()

@@ -50,21 +50,18 @@ def ready() -> JSONResponse:
     }
 
     provider_directory = canonical_engine.provider_directory.health()
-    directory_ready = (
-        provider_directory.get("provider") == "osm"
-        and provider_directory.get("status") == "ready"
-    )
+    directory_configured = provider_directory.get("provider") == "osm"
     directory_check = {
         **provider_directory,
         "status": (
             provider_directory.get("status", "not_ready")
-            if directory_ready
+            if directory_configured
             else "not_ready"
         ),
     }
     state_check = state_store.readiness()
     state_ready = state_check["status"] in {"ready", "disabled"}
-    overall_ready = llm_ready and directory_ready and state_ready
+    overall_ready = llm_ready and directory_configured and state_ready
     payload = {
         "status": "ready" if overall_ready else "not_ready",
         "engine": conversation_engine,

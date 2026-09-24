@@ -99,8 +99,11 @@ class ProviderDirectory:
         self._cache_ttl_seconds = int(os.getenv("PROVIDER_DIRECTORY_CACHE_TTL", "600"))
         self._radius_meters = int(os.getenv("PROVIDER_DIRECTORY_RADIUS_METERS", "5000"))
         self._search_timeout_seconds = float(os.getenv("PROVIDER_DIRECTORY_SEARCH_TIMEOUT", "8"))
+        self._overpass_max_attempts = max(
+            1, int(os.getenv("PROVIDER_DIRECTORY_OVERPASS_MAX_ATTEMPTS", "1"))
+        )
         self._operation_timeout_seconds = float(
-            os.getenv("PROVIDER_DIRECTORY_OPERATION_TIMEOUT", "12")
+            os.getenv("PROVIDER_DIRECTORY_OPERATION_TIMEOUT", "20")
         )
         self._nominatim_timeout_seconds = float(
             os.getenv("PROVIDER_DIRECTORY_GEOCODE_TIMEOUT", "5")
@@ -134,46 +137,46 @@ class ProviderDirectory:
         try:
             latitude, longitude, resolved_location = self._geocode(location, deadline)
             directory_error: Exception | None = None
+            providers = []
+            used_nominatim = False
             try:
-                elements = self._search_openstreetmap(
-                    latitude,
-                    longitude,
-                    profile["filters"],
-                    profile.get("name_pattern"),
-                    deadline,
+                providers = self._search_nominatim_providers(
+                    care_setting=care_setting,
+                    location=location,
+                    profile_name=profile_name,
+                    profile=profile,
+                    origin_latitude=latitude,
+                    origin_longitude=longitude,
+                    deadline=deadline,
                 )
-                providers = self._providers_from_elements(
-                    elements,
-                    profile_name,
-                    latitude,
-                    longitude,
-                )
+                used_nominatim = bool(providers)
             except (httpx.HTTPError, ProviderDirectoryError) as exc:
                 directory_error = exc
-                providers = []
 
-            used_nominatim_fallback = False
             if not providers:
                 try:
-                    providers = self._search_nominatim_providers(
-                        care_setting=care_setting,
-                        location=location,
-                        profile_name=profile_name,
-                        profile=profile,
-                        origin_latitude=latitude,
-                        origin_longitude=longitude,
-                        deadline=deadline,
+                    elements = self._search_openstreetmap(
+                        latitude,
+                        longitude,
+                        profile["filters"],
+                        profile.get("name_pattern"),
+                        deadline,
                     )
-                    directory_error = None
+                    providers = self._providers_from_elements(
+                        elements,
+                        profile_name,
+                        latitude,
+                        longitude,
+                    )
+                    if providers:
+                        directory_error = None
                 except (httpx.HTTPError, ProviderDirectoryError) as exc:
                     directory_error = exc
-                    providers = []
-                used_nominatim_fallback = bool(providers)
 
             result = ProviderSearchResult(
                 location=location,
                 providers=providers,
-                source="OpenStreetMap/Nominatim" if used_nominatim_fallback else "OpenStreetMap",
+                source="OpenStreetMap/Nominatim" if used_nominatim else "OpenStreetMap",
                 error=(
                     "The provider directory search is temporarily unavailable."
                     if directory_error is not None and not providers
@@ -206,43 +209,43 @@ class ProviderDirectory:
         try:
             latitude, longitude, resolved_location = self._geocode(location, deadline)
             directory_error: Exception | None = None
+            providers = []
+            used_nominatim = False
             try:
-                elements = self._search_openstreetmap(
-                    latitude,
-                    longitude,
-                    [],
-                    re.escape(provider_name.strip()),
-                    deadline,
+                providers = self._search_nominatim_named_provider(
+                    provider_name=provider_name,
+                    location=location,
+                    origin_latitude=latitude,
+                    origin_longitude=longitude,
+                    deadline=deadline,
                 )
-                providers = self._providers_from_elements(
-                    elements,
-                    "named_provider",
-                    latitude,
-                    longitude,
-                )
+                used_nominatim = bool(providers)
             except (httpx.HTTPError, ProviderDirectoryError) as exc:
                 directory_error = exc
-                providers = []
 
-            used_nominatim_fallback = False
             if not providers:
                 try:
-                    providers = self._search_nominatim_named_provider(
-                        provider_name=provider_name,
-                        location=location,
-                        origin_latitude=latitude,
-                        origin_longitude=longitude,
-                        deadline=deadline,
+                    elements = self._search_openstreetmap(
+                        latitude,
+                        longitude,
+                        [],
+                        re.escape(provider_name.strip()),
+                        deadline,
                     )
-                    directory_error = None
+                    providers = self._providers_from_elements(
+                        elements,
+                        "named_provider",
+                        latitude,
+                        longitude,
+                    )
+                    if providers:
+                        directory_error = None
                 except (httpx.HTTPError, ProviderDirectoryError) as exc:
                     directory_error = exc
-                    providers = []
-                used_nominatim_fallback = bool(providers)
             result = ProviderSearchResult(
                 location=location,
                 providers=providers,
-                source="OpenStreetMap/Nominatim" if used_nominatim_fallback else "OpenStreetMap",
+                source="OpenStreetMap/Nominatim" if used_nominatim else "OpenStreetMap",
                 error=(
                     "The provider directory search is temporarily unavailable."
                     if directory_error is not None and not providers
@@ -364,10 +367,17 @@ class ProviderDirectory:
         deadline: float | None = None,
     ) -> list[dict[str, Any]]:
         with self._lock:
-            elapsed = time.monotonic() - self._last_nominatim_request
-            if elapsed < 1.05:
-                time.sleep(1.05 - elapsed)
-            self._last_nominatim_request = time.monotonic()
+            now = time.monotonic()
+            next_allowed = max(now, self._last_nominatim_request + 1.05)
+            wait_seconds = next_allowed - now
+            remaining = _remaining_seconds(deadline)
+            if remaining is not None and wait_seconds >= remaining:
+                raise ProviderDirectoryTimeout("The provider directory operation timed out.")
+            self._last_nominatim_request = next_allowed
+        if wait_seconds:
+            time.sleep(wait_seconds)
+        if deadline is not None and _remaining_seconds(deadline) <= 0:
+            raise ProviderDirectoryTimeout("The provider directory operation timed out.")
 
         headers = {"User-Agent": self._user_agent, "Accept-Language": "en"}
         places = self._request_json(
@@ -478,6 +488,7 @@ class ProviderDirectory:
                     data={"data": query},
                     timeout_seconds=self._search_timeout_seconds,
                     deadline=deadline,
+                    max_attempts=self._overpass_max_attempts,
                 )
                 if not isinstance(payload, dict):
                     raise ProviderDirectoryError("The provider directory returned an invalid response.")
@@ -498,11 +509,13 @@ class ProviderDirectory:
         data: dict[str, Any] | None = None,
         timeout_seconds: float,
         deadline: float | None,
+        max_attempts: int | None = None,
     ) -> Any:
         endpoint = _endpoint_name(url)
         self._check_circuit(endpoint)
         last_error: Exception | None = None
-        for attempt in range(1, self._max_attempts + 1):
+        attempts = max(1, max_attempts or self._max_attempts)
+        for attempt in range(1, attempts + 1):
             if attempt > 1:
                 self._check_circuit(endpoint)
             remaining = _remaining_seconds(deadline)
@@ -510,7 +523,11 @@ class ProviderDirectory:
                 raise ProviderDirectoryTimeout("The provider directory operation timed out.")
             request_timeout = timeout_seconds if remaining is None else min(timeout_seconds, remaining)
             try:
-                with self._http_client_factory(timeout=request_timeout, headers=headers) as client:
+                with self._http_client_factory(
+                    timeout=request_timeout,
+                    headers=headers,
+                    follow_redirects=True,
+                ) as client:
                     response = client.request(method, url, params=params, data=data)
                     response.raise_for_status()
                     payload = response.json()
@@ -528,7 +545,7 @@ class ProviderDirectory:
                 raise ProviderDirectoryError("The provider directory returned an invalid response.") from exc
 
             self._record_failure(endpoint, last_error)
-            if attempt >= self._max_attempts:
+            if attempt >= attempts:
                 break
             remaining = _remaining_seconds(deadline)
             backoff = self._retry_backoff_seconds * attempt
@@ -690,6 +707,10 @@ def _profile_search_term(care_setting: str, profile_name: str) -> str:
         return "dentist"
     if any(term in normalized for term in ("hospital", "emergency")):
         return "hospital"
+    if any(term in normalized for term in ("doctor", "doc", "gp", "general practitioner")):
+        return "doctor"
+    if "clinic" in normalized:
+        return "clinic"
     return "medical clinic"
 
 
