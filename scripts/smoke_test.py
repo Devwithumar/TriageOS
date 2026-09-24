@@ -1796,6 +1796,9 @@ def test_provider_option_matching(results: Results) -> None:
         if not all(resolve_provider_reference(text, options) == options[1] for text in references):
             results.fail("provider option matching", "informal provider references did not resolve")
             return
+        if resolve_provider_reference("Yeah, I mean a doctor, somewhere close by.", options) is not None:
+            results.fail("provider option matching", "vague care language auto-selected a provider")
+            return
 
         class OptionProposalSource:
             def propose(self, user_text, state, recent_messages, correlation_id):
