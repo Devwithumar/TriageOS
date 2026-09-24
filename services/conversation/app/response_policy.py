@@ -130,19 +130,17 @@ def build_response(result: OrchestrationResult) -> ResponseDecision:
     if provider_failure:
         return provider_failure
 
-    if (
-        state.active_task != TaskName.NONE
-        and proposal is not None
-        and proposal.intent not in _WORKFLOW_INTENTS
-        and not proposal.slots
-        and not proposal.corrections
-    ):
-        return _general_response(proposal)
-
     if state.active_task != TaskName.NONE:
         clarification = _workflow_clarification_response(result)
         if clarification:
             return clarification
+        if (
+            proposal is not None
+            and proposal.intent not in _WORKFLOW_INTENTS
+            and not proposal.slots
+            and not proposal.corrections
+        ):
+            return _general_response(proposal)
         workflow_response = _workflow_response(state)
         if workflow_response:
             return workflow_response

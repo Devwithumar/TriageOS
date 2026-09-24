@@ -429,11 +429,16 @@ class ProviderDirectory:
     ) -> Provider | None:
         if "lat" not in place or "lon" not in place:
             return None
-        tags = place.get("extratags", {})
+        tags = place.get("extratags")
+        if not isinstance(tags, dict):
+            tags = {}
+        namedetails = place.get("namedetails")
+        if not isinstance(namedetails, dict):
+            namedetails = {}
         address = _nominatim_address(place)
         name = str(
             place.get("name")
-            or place.get("namedetails", {}).get("name")
+            or namedetails.get("name")
             or str(place.get("display_name", "")).split(",", 1)[0]
         ).strip()
         if not name:

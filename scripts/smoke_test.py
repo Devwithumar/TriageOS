@@ -1487,7 +1487,7 @@ def test_provider_lookup_boundary(results: Results) -> None:
             ("Could you look for a doctor in Toronto?", "doctor", "Toronto"),
             ("I live around Nairobi and need a hospital.", "hospital", "Nairobi"),
             ("I wanna find a doc close by in Toronto.", "doctor", "Toronto"),
-            ("I am round here in Greater London and need somewhere to get checked.", "doctor", "Greater London"),
+            ("I am round here in Greater London and need somewhere to get checked.", "clinic", "Greater London"),
         )
         for index, (text, expected_care, expected_location) in enumerate(cases):
             proposal = build_recovery_proposal(

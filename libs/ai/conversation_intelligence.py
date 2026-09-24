@@ -199,22 +199,22 @@ def detect_intent(text: str) -> ConversationIntent:
         return ConversationIntent("appointment_change", 0.96, topic, True)
     if any(phrase in normalized for phrase in ("yes", "confirm", "looks good", "that's correct", "that is correct")):
         return ConversationIntent("confirmation", 0.9, topic, False)
-    if any(phrase in normalized for phrase in ("actually", "change that", "correct that", "i meant", "i mean")):
-        return ConversationIntent("correction", 0.88, topic, True)
     if any(term in normalized for term in RECEPTIONIST_TERMS):
         return ConversationIntent("appointment_request", 0.96, topic, True)
     if _is_capability_question(normalized):
         return ConversationIntent("capabilities", 0.96, topic, True)
     if _is_practice_information_question(normalized):
         return ConversationIntent("practice_information", 0.94, topic, True)
-    if (
-        (any(term in normalized for term in PROVIDER_TERMS)
-         or any(term in normalized for term in GENERIC_PROVIDER_LOOKUP_TERMS))
-        and any(
-        marker in normalized for marker in LOCAL_LOOKUP_MARKERS
-        )
-    ):
+    has_provider_term = any(term in normalized for term in PROVIDER_TERMS) or any(
+        term in normalized for term in GENERIC_PROVIDER_LOOKUP_TERMS
+    )
+    has_local_lookup_marker = any(marker in normalized for marker in LOCAL_LOOKUP_MARKERS) or bool(
+        re.search(r"\b(?:around|near|close(?:\s+to)?|by)\s+\w", normalized)
+    )
+    if has_provider_term and has_local_lookup_marker:
         return ConversationIntent("provider_lookup", 0.94, topic, True)
+    if any(phrase in normalized for phrase in ("actually", "change that", "correct that", "i meant", "i mean")):
+        return ConversationIntent("correction", 0.88, topic, True)
     if any(greeting in normalized.split() for greeting in ("hello", "hi", "hey", "good morning", "good afternoon")):
         return ConversationIntent("greeting", 0.98, topic, True)
     if any(phrase in normalized for phrase in ("thank you", "thanks", "appreciate it")):
@@ -286,7 +286,7 @@ def canonical_care_setting(text: str) -> str | None:
         if any(re.search(rf"\b{re.escape(value)}\b", normalized) for value in values):
             return canonical
     if any(term in normalized for term in GENERIC_PROVIDER_LOOKUP_TERMS):
-        return "doctor"
+        return "clinic"
     return None
 
 
