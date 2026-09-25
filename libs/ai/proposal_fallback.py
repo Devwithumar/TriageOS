@@ -89,6 +89,11 @@ def _extract_explicit_slots(
         return []
     if state.active_task == TaskName.NONE and requested_task == TaskName.PROVIDER_LOOKUP:
         return _extract_provider_lookup_slots(user_text)
+    if (
+        task == TaskName.APPOINTMENT_REQUEST
+        and "care_setting" not in state.slots
+    ):
+        return _extract_provider_lookup_slots(user_text)
     if state.active_task == TaskName.NONE and requested_task != TaskName.NONE:
         return []
     if state.workflow_state == WorkflowState.SELECTING_PROVIDER:
@@ -141,17 +146,18 @@ def _extract_provider_lookup_slots(user_text: str) -> list[ProposedSlot]:
     if care_setting is None and "provider" in normalized:
         care_setting = "doctor"
     conjunction = r"\s*(?:,\s*)?(?:and|but|so|plus)\s+(?:i|we|please|want|wanna|need|would|looking|trying|hoping|just)\b"
+    location_boundary = rf"(?={conjunction}|\s+(?:for|because|with)\b|[?.!;]|$)"
     location_match = re.search(
         r"\b(?:i\s+(?:am|'m)|we\s+(?:are|'re)|live|located|based|stay)\s+"
         r"(?:in|at|near)\s+(?P<location>[^?.!;]+?)"
-        rf"(?={conjunction}|[?.!;]|$)",
+        + location_boundary,
         user_text,
         re.IGNORECASE,
     )
     if location_match is None:
         location_match = re.search(
             r"\b(?:near|in|around|at|close to)\s+(?P<location>[^?.!;]+?)"
-            rf"(?={conjunction}|[?.!;]|$)",
+            + location_boundary,
             user_text,
             re.IGNORECASE,
         )
