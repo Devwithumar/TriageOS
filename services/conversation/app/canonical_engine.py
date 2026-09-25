@@ -6,7 +6,7 @@ from threading import Lock, RLock
 from typing import Any
 
 from libs.ai.config import load_llm_config
-from libs.ai.conversation_intelligence import detect_intent
+from libs.ai.conversation_intelligence import canonical_care_setting, detect_intent
 from libs.ai.proposal_adapter import ProposalAdapter, ProposalAdapterError, ProposalCompletion
 from libs.ai.proposal_fallback import build_recovery_proposal
 from libs.conversation.domain import (
@@ -597,6 +597,35 @@ class _PolicyAwareProposalSource:
                     }
                 )
             recovery = build_recovery_proposal(user_text, state, correlation_id)
+            if (
+                any(slot.name == "care_setting" for slot in recovery.slots)
+                and (
+                    (
+                        state.active_task == TaskName.NONE
+                        and proposal.requested_task == TaskName.APPOINTMENT_REQUEST
+                    )
+                    or (
+                        state.active_task == TaskName.APPOINTMENT_REQUEST
+                        and "care_setting" not in state.slots
+                    )
+                )
+            ):
+                recovery_names = {slot.name for slot in recovery.slots}
+                proposal = proposal.model_copy(
+                    update={
+                        "slots": [
+                            slot
+                            for slot in proposal.slots
+                            if slot.name not in recovery_names
+                            and not (
+                                slot.name == "appointment_reason"
+                                and canonical_care_setting(slot.value) is not None
+                            )
+                        ]
+                        + recovery.slots,
+                        "dialogue_act": DialogueAct.INFORM,
+                    }
+                )
             if recovery.slots:
                 captured_names = {slot.name for slot in proposal.slots}
                 missing_explicit_slots = [
