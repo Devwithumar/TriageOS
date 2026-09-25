@@ -437,7 +437,13 @@ def _provider_selection_response(result: OrchestrationResult) -> ResponseDecisio
     if provider_name is None:
         return None
     if result.session.state.active_task == TaskName.APPOINTMENT_REQUEST:
-        text = f"Great, I’ve selected {provider_name.value}. What day or time would you prefer?"
+        if "appointment_reason" not in result.session.state.slots:
+            text = (
+                f"Great, I’ve selected {provider_name.value}. "
+                "What would you like help with during the visit?"
+            )
+        else:
+            text = f"Great, I’ve selected {provider_name.value}. What day or time would you prefer?"
     else:
         text = (
             f"Great, I’ve selected {provider_name.value}. Would you like more details, "
