@@ -601,20 +601,33 @@ class _PolicyAwareProposalSource:
                     }
                 )
             recovery = build_recovery_proposal(user_text, state, correlation_id)
+            recovery_names = {slot.name for slot in recovery.slots}
             if (
-                any(slot.name == "care_setting" for slot in recovery.slots)
-                and (
-                    (
-                        state.active_task == TaskName.NONE
-                        and proposal.requested_task == TaskName.APPOINTMENT_REQUEST
-                    )
-                    or (
-                        state.active_task == TaskName.APPOINTMENT_REQUEST
-                        and "care_setting" not in state.slots
+                (
+                    "care_setting" in recovery_names
+                    and (
+                        (
+                            state.active_task == TaskName.NONE
+                            and proposal.requested_task == TaskName.APPOINTMENT_REQUEST
+                        )
+                        or (
+                            state.active_task == TaskName.APPOINTMENT_REQUEST
+                            and "care_setting" not in state.slots
+                        )
                     )
                 )
+                or (
+                    state.active_task == TaskName.APPOINTMENT_REQUEST
+                    and "location" not in state.slots
+                    and "location" in recovery_names
+                )
             ):
-                recovery_names = {slot.name for slot in recovery.slots}
+                if (
+                    state.active_task == TaskName.APPOINTMENT_REQUEST
+                    and "location" not in state.slots
+                    and "location" in recovery_names
+                ):
+                    recovery_names.add("appointment_reason")
                 proposal = proposal.model_copy(
                     update={
                         "slots": [

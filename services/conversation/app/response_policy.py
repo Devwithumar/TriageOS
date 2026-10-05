@@ -464,6 +464,18 @@ def _workflow_response(state: ConversationState) -> ResponseDecision | None:
                 provider="workflow",
                 reason="provider selection required",
             )
+        if (
+            isinstance(state.last_operation_result, ProviderSearchResultData)
+            and state.last_operation_result.error
+        ):
+            return ResponseDecision(
+                text=(
+                    "I don’t have a verified provider option to select because the directory search "
+                    "did not complete. You can say ‘try again’ or give me a different location."
+                ),
+                provider="provider_directory",
+                reason="provider selection blocked by prior directory failure",
+            )
         return ResponseDecision(
             text="I need a verified provider result before collecting appointment details.",
             provider="workflow",
