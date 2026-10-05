@@ -2078,9 +2078,10 @@ async def test_receptionist_appointment_flow(results: Results) -> None:
             if (
                 usage.get("provider") == "workflow"
                 and state.get("appointment_status") == "collecting_details"
-                and state.get("care_setting") == "veterinary care"
+                and state.get("care_setting") == "veterinary"
                 and state.get("location") == "Lagos"
                 and state.get("next_action") == "collect_appointment_reason"
+                and state.get("provider_options") == []
                 and "caller_name" not in state
             ):
                 results.ok("receptionist appointment context")
