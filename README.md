@@ -26,7 +26,7 @@ The first milestone is intentionally narrow:
 - Voice Service: FastAPI WebSocket gateway
 - Conversation Service: FastAPI stateful conversation brain
 - Redis: session state and memory
-- PostgreSQL with pgvector: future structured data and embeddings
+- PostgreSQL with pgvector: durable conversation events and state projections, plus future embeddings
 - NATS: future event-driven workflows
 
 ## Quick Start
@@ -60,6 +60,8 @@ For a consistent local startup with dependency validation and readiness checks, 
 ```
 
 The launcher starts or reuses both services, waits for `/ready` on each service, and prints the relevant startup log if readiness fails.
+
+The local launcher uses in-memory conversation persistence for fast development. The Docker stack configures PostgreSQL as the canonical event and state store; production deployments should set `CONVERSATION_REPOSITORY=postgres` and provide `DATABASE_URL`.
 
 Then open:
 

@@ -72,11 +72,15 @@ The current foundation includes:
 - a pure reducer that enforces the table;
 - stale-operation rejection and audit-only rejection events.
 
+- an opt-in PostgreSQL event log and state projection repository;
+- repository readiness reporting and Docker startup dependency health checks.
+
+The local launcher defaults to the deterministic in-memory repository. The Docker stack uses PostgreSQL as the canonical durable store; Redis remains available for ephemeral state and coordination.
+
 It does not yet:
 
-- connect the new reducer to the live service;
-- choose PostgreSQL tables or Redis keys;
+- add organization-specific PostgreSQL migrations and retention policies;
 - define provider-specific tool payloads;
 - change user-facing responses.
 
-Those are separate design and implementation slices.
+Provider-specific tool payloads and user-facing response changes remain separate slices.
