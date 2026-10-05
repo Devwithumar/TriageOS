@@ -34,7 +34,7 @@ from libs.conversation.orchestrator import (
     OrchestrationResult,
     ProposalSource,
 )
-from libs.conversation.persistence import InMemorySessionRepository
+from libs.conversation.persistence import SessionRepository, build_session_repository
 from libs.conversation.proposals import ConversationProposal
 from libs.conversation.proposals import ProposalConfidenceBand, ProposedSlot, ToolSelectionProposal
 from libs.conversation.contracts import DialogueAct, IntentName
@@ -69,8 +69,9 @@ class CanonicalConversationEngine:
         provider_directory: ProviderDirectory | None = None,
         practice_profile: PracticeProfileLookup | None = None,
         scheduling_service: SchedulingService | None = None,
+        repository: SessionRepository | None = None,
     ) -> None:
-        self.repository = InMemorySessionRepository()
+        self.repository = repository or build_session_repository()
         self.provider_directory = provider_directory or ProviderDirectory()
         self.practice_profile = practice_profile or PracticeProfileLookup()
         self.scheduling_service = scheduling_service or build_scheduling_service()
@@ -82,6 +83,9 @@ class CanonicalConversationEngine:
         self._messages: dict[str, list[dict[str, str]]] = {}
         self._session_locks: dict[str, RLock] = {}
         self._session_locks_guard = Lock()
+
+    def readiness(self) -> dict[str, object]:
+        return self.repository.readiness()
 
     def handle_turn(self, session_id: str, user_text: str) -> CanonicalTurnResult:
         with self._lock_for_session(session_id):

@@ -61,7 +61,9 @@ def ready() -> JSONResponse:
     }
     state_check = state_store.readiness()
     state_ready = state_check["status"] in {"ready", "disabled"}
-    overall_ready = llm_ready and directory_configured and state_ready
+    persistence_check = canonical_engine.readiness()
+    persistence_ready = persistence_check["status"] in {"ready", "disabled"}
+    overall_ready = llm_ready and directory_configured and state_ready and persistence_ready
     payload = {
         "status": "ready" if overall_ready else "not_ready",
         "engine": conversation_engine,
@@ -69,6 +71,7 @@ def ready() -> JSONResponse:
             "llm": llm_check,
             "provider_directory": directory_check,
             "state_store": state_check,
+            "persistence": persistence_check,
         },
     }
     return JSONResponse(status_code=200 if overall_ready else 503, content=payload)
