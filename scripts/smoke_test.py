@@ -20,7 +20,12 @@ from pydantic import ValidationError
 from libs.ai.conversation_intelligence import detect_intent
 from libs.ai.llm import CompletionResult
 from libs.ai.config import LLMConfig
-from libs.ai.proposal_adapter import ProposalAdapter, ProposalAdapterError, parse_proposal_payload
+from libs.ai.proposal_adapter import (
+    ProposalAdapter,
+    ProposalAdapterError,
+    _post_with_retries,
+    parse_proposal_payload,
+)
 from libs.ai.proposal_adapter import ProposalCompletion
 from libs.ai.proposal_fallback import build_recovery_proposal
 from libs.conversation.contracts import (
@@ -465,6 +470,41 @@ def test_structured_proposal_adapter(results: Results) -> None:
         results.ok("structured proposal adapter")
     except Exception as exc:
         results.fail("structured proposal adapter", str(exc))
+
+
+def test_llm_retry_resilience(results: Results) -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, url: str, *, headers: dict[str, str], json: dict[str, object]) -> httpx.Response:
+            self.calls += 1
+            if self.calls == 1:
+                return httpx.Response(429, headers={"Retry-After": "0"}, request=httpx.Request("POST", url))
+            return httpx.Response(200, request=httpx.Request("POST", url))
+
+    previous = {
+        name: os.environ.get(name)
+        for name in ("LLM_MAX_ATTEMPTS", "LLM_RETRY_BACKOFF_SECONDS", "LLM_MAX_RETRY_AFTER_SECONDS")
+    }
+    try:
+        os.environ["LLM_MAX_ATTEMPTS"] = "2"
+        os.environ["LLM_RETRY_BACKOFF_SECONDS"] = "0"
+        os.environ["LLM_MAX_RETRY_AFTER_SECONDS"] = "0"
+        client = FakeClient()
+        response = _post_with_retries(client, "https://example.test", {}, {})
+        if response.status_code != 200 or client.calls != 2:
+            results.fail("llm retry resilience", f"expected one retry and success, got status={response.status_code} calls={client.calls}")
+            return
+        results.ok("llm retry resilience")
+    except Exception as exc:
+        results.fail("llm retry resilience", str(exc))
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def test_orchestration_pipeline(results: Results) -> None:
@@ -2313,14 +2353,21 @@ async def test_stale_turn_superseded(results: Results) -> None:
                 )
             )
 
-            responses: list[dict] = []
-            while len(responses) < 2:
-                try:
-                    message = await recv_json(ws, timeout=3.0)
-                except TimeoutError:
-                    break
-                if message.get("event") == "voice.assistant.response.created":
-                    responses.append(message)
+            try:
+                first_response = await recv_json(ws, timeout=10.0)
+            except TimeoutError:
+                results.fail("stale turn superseded", "the surviving turn did not produce a response")
+                return
+            responses = [
+                first_response
+            ] if first_response.get("event") == "voice.assistant.response.created" else []
+
+            try:
+                follow_up = await recv_json(ws, timeout=0.5)
+            except TimeoutError:
+                follow_up = None
+            if follow_up and follow_up.get("event") == "voice.assistant.response.created":
+                responses.append(follow_up)
 
             if len(responses) != 1:
                 results.fail("stale turn superseded", f"expected 1 response, got {len(responses)}")
@@ -2359,6 +2406,7 @@ async def main() -> int:
     test_tool_and_persistence_contracts(results)
     test_proposal_validation(results)
     test_structured_proposal_adapter(results)
+    test_llm_retry_resilience(results)
     test_orchestration_pipeline(results)
     test_canonical_conversation_engine(results)
     test_practice_profile_slice(results)

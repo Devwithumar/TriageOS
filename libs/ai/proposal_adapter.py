@@ -1,7 +1,9 @@
 """Structured LLM adapter for untrusted conversation proposals."""
 
 import json
+import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -149,7 +151,7 @@ def _openai_compatible_json(
     }
     try:
         with httpx.Client(timeout=30.0) as client:
-            response = client.post(url, headers=headers, json=payload)
+            response = _post_with_retries(client, url, headers, payload)
             response.raise_for_status()
             body = response.json()
         content = body["choices"][0]["message"]["content"]
@@ -180,7 +182,12 @@ def _anthropic_json(
     }
     try:
         with httpx.Client(timeout=30.0) as client:
-            response = client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
+            response = _post_with_retries(
+                client,
+                "https://api.anthropic.com/v1/messages",
+                headers,
+                payload,
+            )
             response.raise_for_status()
             body = response.json()
         content = " ".join(block["text"] for block in body.get("content", []) if block.get("type") == "text")
@@ -208,6 +215,44 @@ def _parse_json_text(content: Any) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ProposalAdapterError("structured provider response must be a JSON object")
     return parsed
+
+
+def _post_with_retries(
+    client: httpx.Client,
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+) -> httpx.Response:
+    max_attempts = max(1, int(os.getenv("LLM_MAX_ATTEMPTS", "2")))
+    last_response: httpx.Response | None = None
+    for attempt in range(max_attempts):
+        try:
+            response = client.post(url, headers=headers, json=payload)
+        except httpx.RequestError:
+            if attempt + 1 >= max_attempts:
+                raise
+            time.sleep(_llm_retry_delay(None, attempt))
+            continue
+        last_response = response
+        if response.status_code not in {429, *range(500, 600)} or attempt + 1 >= max_attempts:
+            return response
+        time.sleep(_llm_retry_delay(response, attempt))
+    if last_response is None:
+        raise ProposalAdapterError("structured proposal provider request failed")
+    return last_response
+
+
+def _llm_retry_delay(response: httpx.Response | None, attempt: int) -> float:
+    maximum = max(0.0, float(os.getenv("LLM_MAX_RETRY_AFTER_SECONDS", "2")))
+    if response is not None:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return min(max(0.0, float(retry_after)), maximum)
+            except ValueError:
+                pass
+    backoff = max(0.0, float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "0.25")))
+    return min(backoff * (attempt + 1), maximum)
 
 
 def _usage(body: dict[str, Any]) -> dict[str, int | None]:
