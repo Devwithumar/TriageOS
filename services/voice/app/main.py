@@ -7,12 +7,13 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from libs.events import event_names
 from libs.observability.logging import configure_logging
+from libs.observability.metrics import MetricsRegistry
 from services.voice.app.conversation_client import ConversationClient
 from services.voice.app.schemas import ClientEvent, ServerEvent
 from services.voice.app.session import VoiceSessionController
@@ -23,6 +24,7 @@ configure_logging("voice-service")
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="TriageOS Voice Service", version="0.1.0")
+metrics = MetricsRegistry()
 conversation_client = ConversationClient()
 frontend_path = Path(__file__).resolve().parents[3] / "frontend" / "web"
 
@@ -33,6 +35,11 @@ if frontend_path.exists():
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def prometheus_metrics() -> PlainTextResponse:
+    return PlainTextResponse(metrics.render(), media_type="text/plain; version=0.0.4")
 
 
 @app.get("/ready")
@@ -87,12 +94,14 @@ async def process_turn(
     stt_ms: int | None,
 ) -> None:
     turn_started_at = time.perf_counter()
+    outcome = "error"
     try:
         llm_started_at = time.perf_counter()
         turn = await conversation_client.create_turn(session.session_id, user_text)
         llm_ms = round((time.perf_counter() - llm_started_at) * 1000)
 
         if not session.is_turn_active(turn_id):
+            outcome = "superseded"
             logger.info(
                 "turn_stale_dropped session=%s turn_id=%s llm_ms=%s",
                 session.session_id,
@@ -131,7 +140,9 @@ async def process_turn(
                 },
             ),
         )
+        outcome = "success"
     except asyncio.CancelledError:
+        outcome = "cancelled"
         logger.info(
             "turn_task_cancelled session=%s turn_id=%s",
             session.session_id,
@@ -160,6 +171,13 @@ async def process_turn(
             )
         except Exception:
             logger.info("unable_to_send_turn_error session=%s", session.session_id)
+    finally:
+        metrics.increment("triageos_voice_turns_total", {"outcome": outcome})
+        metrics.observe(
+            "triageos_voice_turn_duration_seconds",
+            time.perf_counter() - turn_started_at,
+            {"outcome": outcome},
+        )
 
 
 @app.websocket("/v1/voice/sessions/{session_id}/stream")

@@ -2023,6 +2023,29 @@ async def test_health(results: Results) -> None:
                 results.fail(name, str(exc))
 
 
+async def test_metrics_endpoints(results: Results) -> None:
+    checks = [
+        ("conversation metrics", f"{CONVERSATION_URL}/metrics", "triageos_conversation_turns_total"),
+        ("voice metrics", f"{VOICE_URL}/metrics", "triageos_voice_turns_total"),
+    ]
+    async with httpx.AsyncClient() as client:
+        for name, url, required_metric in checks:
+            try:
+                response = await client.get(url, timeout=5)
+                body = response.text
+                if (
+                    response.status_code == 200
+                    and "text/plain" in response.headers.get("content-type", "")
+                    and required_metric in body
+                    and "session_id" not in body
+                ):
+                    results.ok(name)
+                else:
+                    results.fail(name, f"status={response.status_code} body={body[:300]}")
+            except Exception as exc:
+                results.fail(name, str(exc))
+
+
 async def test_web_client(results: Results) -> None:
     async with httpx.AsyncClient() as client:
         try:
@@ -2434,6 +2457,7 @@ async def main() -> int:
     await test_interruption_layer(results)
     await test_stale_turn_superseded(results)
     await test_invalid_event(results)
+    await test_metrics_endpoints(results)
 
     print("\n" + "=" * 32)
     print(f"Passed: {len(results.passed)}  Failed: {len(results.failed)}  Warnings: {len(results.warnings)}")

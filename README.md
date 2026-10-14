@@ -61,6 +61,8 @@ For a consistent local startup with dependency validation and readiness checks, 
 
 The launcher starts or reuses both services, waits for `/ready` on each service, and prints the relevant startup log if readiness fails.
 
+Both services expose dependency-free Prometheus metrics at `/metrics`. Conversation metrics include turn outcomes and duration; voice metrics include turn outcomes and duration. Labels are limited to bounded outcome and provider values, and request text, session IDs, and other PII are never exported. Scrape these endpoints with Prometheus or an equivalent collector in a deployed environment.
+
 The local launcher uses in-memory conversation persistence for fast development. The Docker stack configures PostgreSQL as the canonical event and state store; production deployments should set `CONVERSATION_REPOSITORY=postgres` and provide `DATABASE_URL`.
 
 Then open:
